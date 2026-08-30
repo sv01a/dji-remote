@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer ring — 360° orbit (stroke only) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M54,22 A32,32 0 1,1 53.99,22 Z"
+        android:strokeColor="#50DC78"
+        android:strokeWidth="2.5"/>
+
+    <!-- Arrowhead on ring (top-right) -->
+    <path
+        android:fillColor="#50DC78"
+        android:pathData="M84,38 L89,30 L82,33 Z"/>
+
+    <!-- Camera body — rounded rectangle -->
+    <path
+        android:fillColor="#1A1F2E"
+        android:strokeWidth="1.5"
+        android:strokeColor="#50DC78"
+        android:pathData="M44,40 h26 a6,6 0 0,1 6,6 v22 a6,6 0 0,1 -6,6 h-26 a6,6 0 0,1 -6,-6 v-22 a6,6 0 0,1 6,-6 Z"/>
+
+    <!-- Lens circle -->
+    <path
+        android:fillColor="#0D1117"
+        android:strokeWidth="1.2"
+        android:strokeColor="#50DC78"
+        android:pathData="M54,54 m-9,0 a9,9 0 1,1 18,0 a9,9 0 1,1 -18,0"/>
+
+    <!-- Lens inner dot -->
+    <path
+        android:fillColor="#50DC78"
+        android:pathData="M54,54 m-2.5,0 a2.5,2.5 0 1,1 5,0 a2.5,2.5 0 1,1 -5,0"/>
+
+    <!-- Shutter button (top-right corner of body) -->
+    <path
+        android:fillColor="#50DC78"
+        android:pathData="M66,43 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0"/>
+
+</vector>

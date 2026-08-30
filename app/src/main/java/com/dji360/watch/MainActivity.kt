@@ -1,0 +1,552 @@
+package com.dji360.watch
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.Bundle
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.dji360.watch.ble.BleClient
+import com.dji360.watch.dji.DjiCommands
+import com.dji360.watch.dji.DjiLink
+import com.dji360.watch.gps.GpsPusher
+import kotlinx.coroutines.CoroutineScope
+import java.lang.Class
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.Locale
+
+/**
+ * Clean watch UI. States:
+ *
+ *   ○ DISCONNECTED   [ CONNECT ]
+ *   ◌ CONNECTING…
+ *   ● READY           🎥 360 Video    ( REC )   QS    ✕(угол)
+ *   ● RECORDING       01:27     ( STOP )
+ *
+ * Режим — пиктограммой + именем. Дисконнект — маленькая ✕ в правом нижнем углу.
+ */
+class MainActivity : Activity() {
+
+    private enum class Ui { DISCONNECTED, SCANNING, CONNECTING, READY, RECORDING, REJECTED, FAILED }
+
+    private lateinit var modeText: TextView
+    private lateinit var bigText: TextView
+    private lateinit var mainButton: Button
+    private lateinit var qsBtn: Button
+    private lateinit var batteryText: TextView
+    private lateinit var gpsIcon: TextView
+    private lateinit var coordText: TextView
+    private lateinit var disconnectBtn: Button
+
+    private lateinit var ble: BleClient
+    private lateinit var link: DjiLink
+    private val uiScope = CoroutineScope(Dispatchers.Main)
+    private var uiJob: Job? = null
+    private var connectJob: Job? = null
+    private var reconnectAttempt = 0
+    private lateinit var gps: GpsPusher
+    private var gpsRunning = false
+    private var satCount = 0
+    private var lastLat = 0.0
+    private var lastLng = 0.0
+    private var gpsFix = false
+    private var activeScan: Diagnostics.BleScanTest? = null
+
+    private val accent get() = Color.argb(255, 80, 220, 120)
+    private val red get() = Color.argb(255, 255, 92, 92)
+    private val dim get() = Color.argb(255, 150, 150, 150)
+    private val dimColor get() = Color.argb(255, 95, 100, 106)
+
+    @SuppressLint("MissingPermission")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        buildUi()
+        ble = BleClient(applicationContext)
+        val mac = readOwnMac()
+        val macBytes = mac.split(":").mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
+        link = DjiLink(ble, uiScope, macBytes) { msg -> android.util.Log.d("DJIRemote", msg) }
+        link.start()
+        gps = GpsPusher(applicationContext, link, uiScope, { msg -> android.util.Log.d("DJIRemote", msg) }, { sats ->
+            satCount = sats
+        }, onFixState = { fixed -> gpsFix = fixed }, onLocation = { lat, lng ->
+            lastLat = lat; lastLng = lng
+        })
+        observe()
+        askPermissionsIfRequired()
+    }
+
+    /**
+     * Our own MAC for the DJI handshake. BluetoothAdapter.getAddress() needs the
+     * BLUETOOTH_CONNECT runtime permission, which may not be granted yet during
+     * onCreate — so read it from system properties (no BT permission required),
+     * and fall back to 00:00:00:00:00:00 if unavailable.
+     */
+    private fun readOwnMac(): String {
+        // Try BluetoothAdapter.getAddress() first (may throw without runtime permission).
+        runCatching {
+            val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            val fromBt = ad?.address
+            if (fromBt != null && fromBt.isNotBlank() && fromBt != "02:00:00:00:00:00") return fromBt
+        }
+        // Read system properties via reflection — ro.boot.wifimacaddr / net.wifi.wifimacaddr on HarmonyOS/Huawei.
+        val propNames = listOf("ro.boot.wifimacaddr", "net.wifi.wifimacaddr", "ro.boot.btmacaddr")
+        for (key in propNames) {
+            val v = runCatching {
+                @Suppress("DiscouragedApi")
+                java.lang.Class.forName("android.os.SystemProperties").getMethod("get", String::class.java).invoke(null, key) as? String
+            }.getOrNull()
+            if (!v.isNullOrBlank() && v.contains(":")) return v
+        }
+        return "00:00:00:00:00:00"
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        uiJob?.cancel(); connectJob?.cancel()
+        gps.stop()
+        link.stop()
+        ble.disconnect()
+    }
+
+    /* ----------------------------- UI ----------------------------- */
+
+    // UI is designed for a ~233dp-wide round watch face (Watch 4 Pro class).
+    // uiScale adapts all dp-based sizes to the actual screen (emulator runs at
+    // 440dpi → only 152dp wide, so fixed sizes overflow).
+    private var uiScale = 1f
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density * uiScale).toInt()
+
+    private fun sp(v: Float) = v * uiScale
+
+    private fun pill(label: String, onClick: () -> Unit): Button = Button(this).apply {
+        text = label
+        textSize = sp(12f)
+        isAllCaps = true
+        setTextColor(Color.WHITE)
+        minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(20).toFloat()
+            setColor(Color.argb(255, 44, 44, 48))
+        }
+        setOnClickListener { onClick() }
+    }
+
+    private fun roundMain(label: String, color: Int, onClick: () -> Unit): Button = Button(this).apply {
+        text = label
+        textSize = sp(18f)
+        gravity = Gravity.CENTER
+        isAllCaps = true
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(if (color == Color.WHITE) Color.BLACK else Color.WHITE)
+        minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+        setPadding(0, dp(10), 0, dp(10))
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+        }
+        setOnClickListener { onClick() }
+    }
+
+    private fun buildUi() {
+        uiScale = resources.displayMetrics.widthPixels /
+            (resources.displayMetrics.density * 233f)
+        if (uiScale > 1f) uiScale = 1f   // never upscale beyond the design size
+
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+
+        // ---- TOP: battery + GPS, side by side ----
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        batteryText = TextView(this).apply {
+            textSize = sp(12f); setTextColor(Color.WHITE); gravity = Gravity.CENTER
+        }
+        gpsIcon = TextView(this).apply {
+            textSize = sp(13f); gravity = Gravity.CENTER
+            setPadding(dp(10), 0, 0, 0); visibility = View.GONE
+        }
+        topRow.addView(batteryText)
+        topRow.addView(gpsIcon)
+        root.addView(topRow, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = dp(20) })
+
+        // Debug-only: live watch coordinates (only rendered in debug builds).
+        coordText = TextView(this).apply {
+            textSize = sp(9f); setTextColor(dim); gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, 0); visibility = View.GONE
+            typeface = Typeface.MONOSPACE
+        }
+        root.addView(coordText, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; topMargin = dp(50) })
+
+        // ---- CENTER: main round button (REC/STOP/CONNECT) ----
+        mainButton = roundMain("CONNECT", Color.argb(255, 40, 120, 220)) { onMainButton() }
+        root.addView(mainButton, FrameLayout.LayoutParams(
+            dp(84), dp(84)
+        ).apply { gravity = Gravity.CENTER })
+
+        // ---- LEFT: quick mode switch (0x00/0x11). Photo is deliberately absent (rule #21). ----
+        qsBtn = pill("QS") { onQs() }
+        qsBtn.visibility = View.GONE
+        root.addView(qsBtn, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; marginStart = dp(8) })
+
+        // ---- RIGHT: disconnect (✕) ----
+        disconnectBtn = Button(this).apply {
+            text = "✕"
+            textSize = sp(16f)
+            isAllCaps = false
+            setTextColor(Color.LTGRAY)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(0, 0, 0, 0)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.argb(160, 40, 40, 44))
+            }
+            visibility = View.GONE
+            setOnClickListener { onDisc() }
+        }
+        root.addView(disconnectBtn, FrameLayout.LayoutParams(
+            dp(40), dp(40)
+        ).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.END; marginEnd = dp(8) })
+
+        // ---- BOTTOM: recording timer + current mode ----
+        bigText = TextView(this).apply {
+            textSize = sp(20f); setTypeface(typeface, Typeface.BOLD)
+            setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        root.addView(bigText, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = dp(46) })
+
+        modeText = TextView(this).apply {
+            textSize = sp(13f); setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        root.addView(modeText, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = dp(16) })
+
+        setContentView(root)
+    }
+
+    /* ------------------------- state rendering ------------------------- */
+
+    private fun render(ui: Ui, camera: DjiLink.CameraState) {
+        // Mode line: icon + name. For Osmo 360 the meaningful mode is the New Camera
+        // Status Push name (0x1D06); the numeric 0x1D02 code is only a fallback.
+        // Hide the line entirely until we've actually parsed at least one status.
+        val connected = link.phase.value == DjiLink.Phase.CONNECTED
+        val hasName = !link.modeName.value.isNullOrEmpty()
+        val name = if (hasName) link.modeName.value!!
+                   else if (connected && camera.hasStatus) DjiLink.modeToString(camera.mode) else ""
+        val icon = if (connected && (hasName || camera.hasStatus))
+            DjiLink.modeIconFor(link.modeName.value, camera.mode) else ""
+        val mode = if (name.isEmpty() || icon.isEmpty()) "" else "$icon  $name"
+        modeText.text = mode
+        modeText.visibility = if (mode.isEmpty()) View.GONE else View.VISIBLE
+
+         // Camera battery, only meaningful once the camera reported it.
+        val bat = if (camera.batteryPercent in 0..100) "🔋 ${camera.batteryPercent}%" else ""
+        batteryText.text = bat
+
+        updateGpsIcon()
+
+        // Debug-only: show live coordinates; never rendered in release builds.
+        if (BuildConfig.DEBUG) {
+            val hasFix = lastLat != 0.0 || lastLng != 0.0
+            coordText.text = if (hasFix)
+                String.format(Locale.US, "%.5f %.5f", lastLat, lastLng) else "—"
+            coordText.visibility = View.VISIBLE
+        } else {
+            coordText.visibility = View.GONE
+        }
+
+        when (ui) {
+            Ui.DISCONNECTED -> {
+                bigText.visibility = View.GONE
+                mainButton.visibility = View.VISIBLE
+                restyleMain("CONNECT", Color.argb(255, 40, 120, 220), Color.WHITE)
+                qsBtn.visibility = View.GONE
+            }
+            Ui.SCANNING, Ui.CONNECTING -> {
+                // Button stays visible & enabled — tapping it cancels the scan.
+                val label = if (ui == Ui.SCANNING) "STOP" else "…"
+                bigText.visibility = View.GONE
+                mainButton.visibility = View.VISIBLE
+                restyleMain(label, dimColor, Color.WHITE)
+                qsBtn.visibility = View.GONE
+            }
+            Ui.READY -> {
+                bigText.visibility = View.GONE
+                mainButton.visibility = View.VISIBLE
+                restyleMain("REC", accent, Color.BLACK)
+                qsBtn.visibility = View.VISIBLE
+            }
+            Ui.RECORDING -> {
+                val t = camera.recordTimeSec
+                bigText.text = String.format(Locale.US, "%02d:%02d", t / 60, t % 60)
+                bigText.visibility = View.VISIBLE
+                mainButton.visibility = View.VISIBLE
+                restyleMain("STOP", red, Color.WHITE)
+                qsBtn.visibility = View.VISIBLE
+            }
+            Ui.REJECTED -> {
+                bigText.visibility = View.GONE
+                mainButton.visibility = View.VISIBLE
+                restyleMain("RETRY", Color.argb(255, 40, 120, 220), Color.WHITE)
+                qsBtn.visibility = View.GONE
+            }
+            Ui.FAILED -> {
+                bigText.visibility = View.GONE
+                mainButton.visibility = View.VISIBLE
+                restyleMain("CONNECT", Color.argb(255, 40, 120, 220), Color.WHITE)
+                qsBtn.visibility = View.GONE
+            }
+        }
+
+        // Side buttons (QS left, ✕ right) only matter once the camera is connected.
+        val sideVisible = ui == Ui.READY || ui == Ui.RECORDING
+        qsBtn.visibility = if (sideVisible) View.VISIBLE else View.GONE
+        disconnectBtn.visibility = if (sideVisible) View.VISIBLE else View.GONE
+    }
+
+    private fun restyleMain(label: String, color: Int, textColor: Int) {
+        mainButton.isEnabled = true
+        if (mainButton.text.toString() != label) {
+            mainButton.text = label
+            mainButton.setTextColor(textColor)
+            (mainButton.background as GradientDrawable).setColor(color)
+        }
+    }
+
+    /**
+     * GPS icon: visible while GPS is running; blinks while the receiver is still
+     * searching for a fix ("на поиске спутников").
+     */
+    private fun updateGpsIcon() {
+        val searching = gpsRunning && !gpsFix
+        gpsIcon.text = "🛰️ $satCount"
+        gpsIcon.visibility = if (gpsRunning) View.VISIBLE else View.GONE
+        val anim = gpsIcon.animation
+        if (searching) {
+            if (anim == null) {
+                val blink = android.view.animation.AlphaAnimation(0.2f, 1f).apply {
+                    duration = 500
+                    repeatMode = android.view.animation.Animation.REVERSE
+                    repeatCount = android.view.animation.Animation.INFINITE
+                }
+                gpsIcon.animation = blink
+                gpsIcon.startAnimation(blink)
+            }
+        } else {
+            if (anim != null) {
+                gpsIcon.clearAnimation()
+                gpsIcon.alpha = 1f
+            }
+        }
+    }
+
+    private fun currentUi(): Ui = when {
+        link.phase.value == DjiLink.Phase.CONNECTED ->
+            if (link.camera.value.isRecording) Ui.RECORDING else Ui.READY
+        link.phase.value == DjiLink.Phase.REJECTED -> Ui.REJECTED
+        connectJob?.isActive == true ->
+            if (ble.connectionState.value == BleClient.STATE_READY) Ui.CONNECTING else Ui.SCANNING
+        else -> Ui.DISCONNECTED
+    }
+
+    /** Re-render whenever phase, camera state or mode name changes. */
+    private fun observe() {
+        uiJob = uiScope.launch {
+            var last = ""
+            while (true) {
+                val ui = currentUi()
+                val cam = link.camera.value
+                val key = "$ui|${cam.mode}|${cam.status}|${cam.recordTimeSec}|${cam.batteryPercent}|${cam.hasStatus}|${link.modeName.value}|$satCount|$gpsFix|$lastLat|$lastLng"
+                if (key != last) {
+                    last = key
+                    render(ui, cam)
+                }
+                delay(200)
+            }
+        }
+    }
+
+    /* --------------------------- actions --------------------------- */
+
+    private fun askPermissionsIfRequired() {
+        val want = if (Build.VERSION.SDK_INT >= 31)
+            listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        val missing = want.filterNot { granted(it) }
+        if (missing.isEmpty()) {
+            if (!gpsRunning) { gps.start(); gpsRunning = true }
+            startConnect()
+        } else {
+            requestPermissions(missing.toTypedArray(), REQ_PERM)
+        }
+    }
+
+    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(code, perms, results)
+        if (code == REQ_PERM && results.all { it == PackageManager.PERMISSION_GRANTED }) {
+            if (!gpsRunning) { gps.start(); gpsRunning = true }
+            startConnect()
+        } else if (code == REQ_PERM) {
+            Diagnostics.doubleBuzz(applicationContext)
+        }
+    }
+
+    private fun onMainButton() {
+        when (currentUi()) {
+            Ui.READY -> {
+                uiScope.launch {
+                    if (link.startRecording()) Diagnostics.shortBuzz(applicationContext)
+                    else Diagnostics.doubleBuzz(applicationContext)
+                }
+            }
+            Ui.RECORDING -> {
+                uiScope.launch {
+                    if (link.stopRecording()) Diagnostics.shortBuzz(applicationContext)
+                    else Diagnostics.doubleBuzz(applicationContext)
+                }
+            }
+            Ui.DISCONNECTED, Ui.REJECTED, Ui.FAILED -> startConnect()
+            Ui.SCANNING, Ui.CONNECTING -> cancelConnect()
+            else -> {}
+        }
+    }
+
+    private fun onQs() {
+        if (link.phase.value != DjiLink.Phase.CONNECTED) return
+        uiScope.launch {
+            if (link.keyReport(DjiCommands.KEY_QS)) Diagnostics.shortBuzz(applicationContext)
+            else Diagnostics.doubleBuzz(applicationContext)
+        }
+    }
+
+    private fun onDisc() {
+        connectJob?.cancel()
+        link.stop()
+        ble.disconnect()
+        gps.stop(); gpsRunning = false
+        reconnectAttempt = 0
+        render(Ui.DISCONNECTED, DjiLink.CameraState())
+    }
+
+    /** Tap on the button while scanning/connecting → cancel and go back to CONNECT. */
+    private fun cancelConnect() {
+        connectJob?.cancel(); connectJob = null
+        activeScan?.cancelIfRunning(); activeScan = null
+        ble.disconnect()
+        reconnectAttempt = 0
+        render(Ui.DISCONNECTED, DjiLink.CameraState())
+    }
+
+    /** Scan → best DJI device → GATT → DJI handshake (rule #23 backoff on retries). */
+    @SuppressLint("MissingPermission")
+    private fun startConnect() {
+        if (connectJob?.isActive == true) return
+        if (!currentPermList().all { granted(it) }) {
+            askPermissionsIfRequired(); return
+        }
+        connectJob = uiScope.launch {
+            // No manual UI hiding here — render() driven by observe() is the
+            // single source of truth (SCANNING/CONNECTING restyle the button).
+            val test = Diagnostics.BleScanTest(applicationContext)
+            activeScan = test
+            test.start(5000, Diagnostics.BleScanTest.Listener(
+                onProgress = { },
+                onFinished = { _ -> }
+            ))
+            // wait for scan window to end and check candidates
+            delay(5100)
+            val dji = test.djiCandidates()
+            if (dji.isEmpty()) {
+                Diagnostics.doubleBuzz(applicationContext)
+                render(Ui.FAILED, DjiLink.CameraState())
+                return@launch
+            }
+            val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
+            val best = bestEntry.value
+            val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            val dev = ad?.getRemoteDevice(bestEntry.key)
+            if (dev == null) {
+                render(Ui.FAILED, DjiLink.CameraState()); return@launch
+            }
+            link.deviceName = best.name ?: "Osmo360"
+            if (!ble.connect(dev)) {
+                Diagnostics.doubleBuzz(applicationContext)
+                render(Ui.FAILED, DjiLink.CameraState())
+                return@launch
+            }
+            // First-ever successful connection → verify_mode=1 (camera shows the
+            // confirmation popup once). Every later connection uses verify_mode=0
+            // so the camera decides by its saved pairing history — it should
+            // remember us and NOT re-ask for confirmation each time.
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            val firstPairing = !prefs.getBoolean(PREFS_PAIRED, false)
+            val ok = link.handshake(firstPairing = firstPairing)
+            if (ok) {
+                prefs.edit().putBoolean(PREFS_PAIRED, true).apply()
+                reconnectAttempt = 0
+                if (!gpsRunning) { gps.start(); gpsRunning = true }
+                Diagnostics.shortBuzz(applicationContext)
+            } else if (link.phase.value == DjiLink.Phase.REJECTED) {
+                Diagnostics.doubleBuzz(applicationContext)
+            } else {
+                Diagnostics.doubleBuzz(applicationContext)
+                ble.disconnect()
+                render(Ui.FAILED, DjiLink.CameraState())
+            }
+        }
+    }
+
+    /* ----------------------------- misc ----------------------------- */
+
+    private fun granted(p: String) =
+        checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    private fun currentPermList(): List<String> =
+        if (Build.VERSION.SDK_INT >= 31)
+            listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    private companion object {
+        const val REQ_PERM = 41
+        const val PREFS = "dji_remote"
+        const val PREFS_PAIRED = "paired_once"
+    }
+}

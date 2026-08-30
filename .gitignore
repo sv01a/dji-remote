@@ -1,0 +1,18 @@
+*.iml
+.gradle/
+.kotlin/
+/local.properties
+.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+app/build/
+
+# upstream reference clone (never shipped)
+/reference/
+
+# build artifacts we don't want committed
+*.apk
+*.aab
