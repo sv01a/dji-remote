@@ -3,6 +3,7 @@ package com.dji360.watch
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.NotificationManager
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -14,6 +15,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -65,6 +67,7 @@ class MainActivity : Activity() {
     private var lastLat = 0.0
     private var lastLng = 0.0
     private var gpsFix = false
+    private var dndActive = false
     private var activeScan: Diagnostics.BleScanTest? = null
 
     private val accent get() = Color.argb(255, 80, 220, 120)
@@ -75,6 +78,21 @@ class MainActivity : Activity() {
     @SuppressLint("MissingPermission")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Keep screen alive & show over lock screen (prevent return to watch face)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
+        }
+
         buildUi()
         ble = BleClient(applicationContext)
         val mac = readOwnMac()
@@ -115,8 +133,25 @@ class MainActivity : Activity() {
         return "00:00:00:00:00:00"
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (uiJob?.isActive != true) {
+            observe()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Save watch battery: pause UI loop if not actively recording
+        if (currentUi() != Ui.RECORDING) {
+            uiJob?.cancel()
+            uiJob = null
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        setDndMode(false)
         uiJob?.cancel(); connectJob?.cancel()
         gps.stop()
         link.stop()
@@ -381,11 +416,27 @@ class MainActivity : Activity() {
 
     /** Re-render whenever phase, camera state or mode name changes. */
     private fun observe() {
+        uiJob?.cancel()
         uiJob = uiScope.launch {
             var last = ""
             while (true) {
                 val ui = currentUi()
                 val cam = link.camera.value
+                val isConn = link.phase.value == DjiLink.Phase.CONNECTED
+
+                // Battery optimization: stop GPS immediately if disconnected from camera
+                if (!isConn && gpsRunning) {
+                    gps.stop()
+                    gpsRunning = false
+                }
+
+                // Notifications management: suppress full-screen interruptions during recording
+                val wantDnd = (ui == Ui.RECORDING)
+                if (wantDnd != dndActive) {
+                    dndActive = wantDnd
+                    setDndMode(dndActive)
+                }
+
                 val key = "$ui|${cam.mode}|${cam.status}|${cam.recordTimeSec}|${cam.batteryPercent}|${cam.hasStatus}|${link.modeName.value}|$satCount|$gpsFix|$lastLat|$lastLng"
                 if (key != last) {
                     last = key
@@ -393,6 +444,24 @@ class MainActivity : Activity() {
                 }
                 delay(200)
             }
+        }
+    }
+
+    private fun setDndMode(enabled: Boolean) {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && nm.isNotificationPolicyAccessGranted) {
+                val targetFilter = if (enabled) {
+                    NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                } else {
+                    NotificationManager.INTERRUPTION_FILTER_ALL
+                }
+                if (nm.currentInterruptionFilter != targetFilter) {
+                    nm.setInterruptionFilter(targetFilter)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("DJIRemote", "Failed to set DND filter: ${e.message}")
         }
     }
 
@@ -408,7 +477,6 @@ class MainActivity : Activity() {
         else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
         val missing = want.filterNot { granted(it) }
         if (missing.isEmpty()) {
-            if (!gpsRunning) { gps.start(); gpsRunning = true }
             startConnect()
         } else {
             requestPermissions(missing.toTypedArray(), REQ_PERM)
@@ -418,7 +486,6 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(code, perms, results)
         if (code == REQ_PERM && results.all { it == PackageManager.PERMISSION_GRANTED }) {
-            if (!gpsRunning) { gps.start(); gpsRunning = true }
             startConnect()
         } else if (code == REQ_PERM) {
             Diagnostics.doubleBuzz(applicationContext)
@@ -458,6 +525,7 @@ class MainActivity : Activity() {
         link.stop()
         ble.disconnect()
         gps.stop(); gpsRunning = false
+        setDndMode(false)
         reconnectAttempt = 0
         render(Ui.DISCONNECTED, DjiLink.CameraState())
     }
@@ -467,6 +535,8 @@ class MainActivity : Activity() {
         connectJob?.cancel(); connectJob = null
         activeScan?.cancelIfRunning(); activeScan = null
         ble.disconnect()
+        gps.stop(); gpsRunning = false
+        setDndMode(false)
         reconnectAttempt = 0
         render(Ui.DISCONNECTED, DjiLink.CameraState())
     }
