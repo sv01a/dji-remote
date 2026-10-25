@@ -24,12 +24,14 @@ import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
 import com.dji360.watch.gps.GpsPusher
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import java.lang.Class
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 /**
@@ -541,7 +543,7 @@ class MainActivity : Activity() {
         render(Ui.DISCONNECTED, DjiLink.CameraState())
     }
 
-    /** Scan → best DJI device → GATT → DJI handshake (rule #23 backoff on retries). */
+    /** Scan → best DJI device → GATT → DJI handshake (fast-connect if recognized). */
     @SuppressLint("MissingPermission")
     private fun startConnect() {
         if (connectJob?.isActive == true) return
@@ -549,26 +551,43 @@ class MainActivity : Activity() {
             askPermissionsIfRequired(); return
         }
         connectJob = uiScope.launch {
-            // No manual UI hiding here — render() driven by observe() is the
-            // single source of truth (SCANNING/CONNECTING restyle the button).
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            val lastMac = prefs.getString(PREFS_LAST_MAC, null)
+            val djiFound = CompletableDeferred<Pair<String, Diagnostics.DevRow>>()
+
             val test = Diagnostics.BleScanTest(applicationContext)
             activeScan = test
+            test.onCandidate = { addr, devRow ->
+                if (lastMac != null && addr.equals(lastMac, ignoreCase = true)) {
+                    djiFound.complete(addr to devRow)
+                } else if (lastMac == null && devRow.rssi > -80) {
+                    djiFound.complete(addr to devRow)
+                }
+            }
             test.start(5000, Diagnostics.BleScanTest.Listener(
                 onProgress = { },
                 onFinished = { _ -> }
             ))
-            // wait for scan window to end and check candidates
-            delay(5100)
-            val dji = test.djiCandidates()
-            if (dji.isEmpty()) {
+
+            // Fast connect: if candidate seen, connect immediately without waiting full 5s
+            val early = runCatching { withTimeoutOrNull(5000) { djiFound.await() } }.getOrNull()
+            test.cancelIfRunning()
+            activeScan = null
+
+            val target = early ?: run {
+                val dji = test.djiCandidates()
+                dji.entries.maxByOrNull { it.value.rssi }?.let { it.key to it.value }
+            }
+
+            if (target == null) {
                 Diagnostics.doubleBuzz(applicationContext)
                 render(Ui.FAILED, DjiLink.CameraState())
                 return@launch
             }
-            val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
-            val best = bestEntry.value
+
+            val (targetMac, best) = target
             val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-            val dev = ad?.getRemoteDevice(bestEntry.key)
+            val dev = ad?.getRemoteDevice(targetMac)
             if (dev == null) {
                 render(Ui.FAILED, DjiLink.CameraState()); return@launch
             }
@@ -580,13 +599,13 @@ class MainActivity : Activity() {
             }
             // First-ever successful connection → verify_mode=1 (camera shows the
             // confirmation popup once). Every later connection uses verify_mode=0
-            // so the camera decides by its saved pairing history — it should
-            // remember us and NOT re-ask for confirmation each time.
-            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            // so the camera decides by its saved pairing history.
             val firstPairing = !prefs.getBoolean(PREFS_PAIRED, false)
             val ok = link.handshake(firstPairing = firstPairing)
             if (ok) {
-                prefs.edit().putBoolean(PREFS_PAIRED, true).apply()
+                prefs.edit().putBoolean(PREFS_PAIRED, true)
+                    .putString(PREFS_LAST_MAC, targetMac)
+                    .apply()
                 reconnectAttempt = 0
                 if (!gpsRunning) { gps.start(); gpsRunning = true }
                 Diagnostics.shortBuzz(applicationContext)
@@ -618,5 +637,6 @@ class MainActivity : Activity() {
         const val REQ_PERM = 41
         const val PREFS = "dji_remote"
         const val PREFS_PAIRED = "paired_once"
+        const val PREFS_LAST_MAC = "last_mac"
     }
 }

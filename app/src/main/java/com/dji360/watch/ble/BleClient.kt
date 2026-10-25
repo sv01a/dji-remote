@@ -58,6 +58,7 @@ class BleClient(private val context: Context) {
     @SuppressLint("MissingPermission") // caller guarantees runtime grants
     suspend fun connect(device: BluetoothDevice, timeoutMs: Long = 12_000): Boolean {
         disconnect()
+        kotlinx.coroutines.delay(100)
         _connectionState.value = STATE_CONNECTING
         val done = CompletableDeferred<Boolean>()
         setupDone = done

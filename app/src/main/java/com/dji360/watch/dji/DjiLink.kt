@@ -43,9 +43,11 @@ class DjiLink(
         val tempState: Int = 0,
         val batteryPercent: Int = -1,
         /** true only after we actually parsed a 0x1D02 status push. */
-        val hasStatus: Boolean = false
+        val hasStatus: Boolean = false,
+        /** optimistic or confirmed recording override */
+        val recordingOverride: Boolean? = null
     ) {
-        val isRecording: Boolean get() = status == 0x03 || status == 0x05
+        val isRecording: Boolean get() = recordingOverride ?: (status == 0x03 || status == 0x05)
     }
 
     var deviceName: String = ""
@@ -100,6 +102,7 @@ class DjiLink(
         lastMode = -1
         _modeName.value = null
         _modeParam.value = null
+        _camera.value = CameraState()
     }
 
     /** Feed one notification; frames never span BLE packets in practice (MTU negotiated). */
@@ -256,6 +259,9 @@ class DjiLink(
         )
         val ok = r != null && (r.size < 1 || r[0].toInt() == 0)
         log("DJI startRecording → ${if (ok) "OK" else "no/err ack"}")
+        if (ok) {
+            _camera.value = _camera.value.copy(recordingOverride = true)
+        }
         return ok
     }
 
@@ -266,6 +272,9 @@ class DjiLink(
         )
         val ok = r != null && (r.size < 1 || r[0].toInt() == 0)
         log("DJI stopRecording → ${if (ok) "OK" else "no/err ack"}")
+        if (ok) {
+            _camera.value = _camera.value.copy(recordingOverride = false)
+        }
         return ok
     }
 
@@ -304,7 +313,7 @@ class DjiLink(
 
     private fun readU16(b: ByteArray, off: Int): Int {
         if (off + 1 >= b.size) return 0
-        return (b[off].toInt() and 0xFF) or (b[off + 1].toInt() and 0xFF shl 8)
+        return (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8)
     }
 
     private fun readU32(b: ByteArray, off: Int): Long {
@@ -316,39 +325,37 @@ class DjiLink(
     }
 
     private fun parseStatusPush(p: ByteArray) {
-        // Packed layout of camera_status_push_command_frame (total 38 bytes):
-        // mode@0 status@1 res@2 fps@3 eis@4 rec_time@5..6 fov@7 ratio@8 countdown@9..10
-        // tl_int@11..12 tl_dur@13..14 remain_cap@15..18 remain_photo@19..22 remain_time@23..26
-        // user_mode@27 power_mode@28 next_flag@29 temp@30 photo_cd@31..34 loop@35..36 battery@37
-        if (p.size < 38) {
-            log("DJI 1D02 unexpected size=${p.size}: ${DjiFrame.hex(p)}")
+        if (p.size < 2) {
+            log("DJI 1D02 too short: ${p.size}")
             return
         }
         val mode = p[0].toInt() and 0xFF
-        // Numeric mode changed → the 0x1D06 name we hold is now stale; drop it
-        // so the UI doesn't keep showing the previous mode's name.
+        val st = p[1].toInt() and 0xFF
         if (lastMode != -1 && mode != lastMode) {
             _modeName.value = null
             _modeParam.value = null
         }
         lastMode = mode
+        val cur = _camera.value
+        val isRec = (st == 0x03 || st == 0x05)
         val s = CameraState(
             mode = mode,
-            status = p[1].toInt() and 0xFF,
-            resolution = p[2].toInt() and 0xFF,
-            fpsIdx = p[3].toInt() and 0xFF,
-            recordTimeSec = readU16(p, 5),
-            remainCapacityMb = readU32(p, 15),
-            remainPhotoNum = readU32(p, 19),
-            remainRecordSec = readU32(p, 23),
-            powerMode = p[28].toInt() and 0xFF,
-            tempState = p[30].toInt() and 0xFF,
-            batteryPercent = p[37].toInt() and 0xFF,
-            hasStatus = true
+            status = st,
+            resolution = if (p.size > 2) p[2].toInt() and 0xFF else cur.resolution,
+            fpsIdx = if (p.size > 3) p[3].toInt() and 0xFF else cur.fpsIdx,
+            recordTimeSec = if (p.size >= 7) readU16(p, 5) else cur.recordTimeSec,
+            remainCapacityMb = if (p.size >= 19) readU32(p, 15) else cur.remainCapacityMb,
+            remainPhotoNum = if (p.size >= 23) readU32(p, 19) else cur.remainPhotoNum,
+            remainRecordSec = if (p.size >= 27) readU32(p, 23) else cur.remainRecordSec,
+            powerMode = if (p.size > 28) p[28].toInt() and 0xFF else cur.powerMode,
+            tempState = if (p.size > 30) p[30].toInt() and 0xFF else cur.tempState,
+            batteryPercent = if (p.size > 37) p[37].toInt() and 0xFF else cur.batteryPercent,
+            hasStatus = true,
+            recordingOverride = isRec
         )
         _camera.value = s
-        log("DJI status: mode=0x%02X st=0x%02X rec=%ds bat=%d%%".format(
-            s.mode, s.status, s.recordTimeSec, s.batteryPercent))
+        log("DJI status: mode=0x%02X st=0x%02X rec=%ds bat=%d%% isRec=%b".format(
+            s.mode, s.status, s.recordTimeSec, s.batteryPercent, s.isRecording))
     }
 
     private fun parseNewStatusPush(p: ByteArray) {

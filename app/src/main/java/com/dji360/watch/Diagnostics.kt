@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -126,6 +127,7 @@ object Diagnostics {
         private val rows = LinkedHashMap<String, DevRow>()
         private var listener: Listener? = null
         private var running = false
+        var onCandidate: ((String, DevRow) -> Unit)? = null
 
         @SuppressLint("MissingPermission") // caller guarantees runtime grants
         fun start(durationMs: Long, l: Listener): Boolean {
@@ -136,7 +138,10 @@ object Diagnostics {
             }
             rows.clear(); running = true
             try {
-                scanner.startScan(callback)
+                val settings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build()
+                scanner.startScan(null, settings, callback)
                 l.onProgress(String.format(Locale.US, "scanning %ds…", durationMs / 1000))
             } catch (se: SecurityException) {
                 running = false; l.onProgress("scan blocked: ${se.message}"); return false
@@ -182,6 +187,9 @@ object Diagnostics {
                 }
             }
             r.scanRecord?.serviceUuids?.forEach { u -> row.svcs += u.uuid.toString().uppercase(Locale.US) }
+            if (row.isDji) {
+                onCandidate?.invoke(r.device.address, row)
+            }
         }
 
         @SuppressLint("MissingPermission")
