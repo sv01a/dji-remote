@@ -91,6 +91,9 @@ class MainActivity : Activity() {
     @SuppressLint("MissingPermission")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            android.util.Log.e("DJIRemote", "FATAL: " + e.message, e)
+        }
 
         // Keep screen alive & show over lock screen (prevent return to watch face)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -119,7 +122,9 @@ class MainActivity : Activity() {
             lastLat = lat; lastLng = lng
         })
         observe()
-        askPermissionsIfRequired()
+        if (askPermissionsIfRequired()) {
+            startConnect()
+        }
     }
 
     /**
@@ -505,20 +510,13 @@ class MainActivity : Activity() {
 
     /* --------------------------- actions --------------------------- */
 
-    private fun askPermissionsIfRequired() {
-        val want = if (Build.VERSION.SDK_INT >= 31)
-            listOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-        else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        val missing = want.filterNot { granted(it) }
-        if (missing.isEmpty()) {
-            startConnect()
-        } else {
+    private fun askPermissionsIfRequired(): Boolean {
+        val missing = currentPermList().filterNot { granted(it) }
+        if (missing.isNotEmpty()) {
             requestPermissions(missing.toTypedArray(), REQ_PERM)
+            return false
         }
+        return true
     }
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
@@ -654,7 +652,7 @@ class MainActivity : Activity() {
         layout.addView(passLabel)
         layout.addView(passInput)
 
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        AlertDialog.Builder(this)
             .setTitle("Wi-Fi камеры")
             .setMessage("На камере: Настройки → Беспроводное подключение")
             .setView(layout)
@@ -723,9 +721,7 @@ class MainActivity : Activity() {
     @SuppressLint("MissingPermission")
     private fun startConnect() {
         if (connectJob?.isActive == true) return
-        if (!currentPermList().all { granted(it) }) {
-            askPermissionsIfRequired(); return
-        }
+        if (!askPermissionsIfRequired()) return
         link.start()
         connectJob = uiScope.launch {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
@@ -800,14 +796,7 @@ class MainActivity : Activity() {
         checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     private fun currentPermList(): List<String> =
-        if (Build.VERSION.SDK_INT >= 33)
-            listOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            )
-        else if (Build.VERSION.SDK_INT >= 31)
+        if (Build.VERSION.SDK_INT >= 31)
             listOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
