@@ -13,6 +13,8 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -24,6 +26,8 @@ import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
 import com.dji360.watch.gps.GpsPusher
+import com.dji360.watch.stream.DatalinkClient
+import com.dji360.watch.stream.LiveVideoDecoder
 import com.dji360.watch.wifi.CameraWifiManager
 import kotlinx.coroutines.CoroutineScope
 import java.lang.Class
@@ -56,10 +60,13 @@ class MainActivity : Activity() {
     private lateinit var coordText: TextView
     private lateinit var disconnectBtn: Button
     private lateinit var liveBtn: Button
+    private lateinit var surfaceView: SurfaceView
 
     private lateinit var ble: BleClient
     private lateinit var link: DjiLink
     private lateinit var wifiManager: CameraWifiManager
+    private var decoder: LiveVideoDecoder? = null
+    private var datalinkClient: DatalinkClient? = null
     private val uiScope = CoroutineScope(Dispatchers.Main)
     private var uiJob: Job? = null
     private var connectJob: Job? = null
@@ -141,8 +148,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         setDndMode(false)
-        uiJob?.cancel(); connectJob?.cancel(); wifiJob?.cancel()
-        wifiManager.disconnect()
+        uiJob?.cancel(); connectJob?.cancel()
+        stopLivePreview()
         gps.stop()
         link.stop()
         ble.disconnect()
@@ -196,6 +203,28 @@ class MainActivity : Activity() {
         if (uiScale > 1f) uiScale = 1f   // never upscale beyond the design size
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+
+        // ---- BACKGROUND: SurfaceView for Live Viewfinder ----
+        surfaceView = SurfaceView(this).apply {
+            visibility = View.GONE
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(h: SurfaceHolder) {
+                    val dec = LiveVideoDecoder(h.surface) { msg ->
+                        android.util.Log.d("DJIRemote", msg)
+                    }
+                    decoder = dec
+                    dec.start()
+                }
+                override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hPx: Int) {}
+                override fun surfaceDestroyed(h: SurfaceHolder) {
+                    decoder?.stop()
+                    decoder = null
+                }
+            })
+        }
+        root.addView(surfaceView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
         // ---- TOP: battery + GPS, side by side ----
         val topRow = LinearLayout(this).apply {
@@ -527,9 +556,8 @@ class MainActivity : Activity() {
     }
 
     private fun onLiveButton() {
-        if (wifiManager.isConnected) {
-            wifiJob?.cancel(); wifiJob = null
-            wifiManager.disconnect()
+        if (wifiManager.isConnected || datalinkClient?.isRunning == true) {
+            stopLivePreview()
             liveBtn.text = "👁 LIVE"
             Diagnostics.shortBuzz(applicationContext)
             return
@@ -550,7 +578,8 @@ class MainActivity : Activity() {
             val ok = wifiManager.connectToCameraAp(ssid, pass)
             if (ok) {
                 Diagnostics.shortBuzz(applicationContext)
-                liveBtn.text = "🟢 AP"
+                liveBtn.text = "🔴 LIVE"
+                startLiveStream()
             } else {
                 Diagnostics.doubleBuzz(applicationContext)
                 liveBtn.text = "❌ WIFI"
@@ -560,11 +589,31 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun startLiveStream() {
+        surfaceView.visibility = View.VISIBLE
+        datalinkClient?.stop()
+        val client = DatalinkClient(uiScope, onVideoFrame = { nal ->
+            decoder?.feedNalUnit(nal)
+        }) { msg ->
+            android.util.Log.d("DJIRemote", msg)
+        }
+        datalinkClient = client
+        client.start()
+    }
+
+    private fun stopLivePreview() {
+        wifiJob?.cancel(); wifiJob = null
+        datalinkClient?.stop(); datalinkClient = null
+        decoder?.stop(); decoder = null
+        surfaceView.visibility = View.GONE
+        wifiManager.disconnect()
+    }
+
     private fun onDisc() {
         connectJob?.cancel(); connectJob = null
         activeScan?.cancelIfRunning(); activeScan = null
-        wifiJob?.cancel(); wifiJob = null
-        wifiManager.disconnect()
+        stopLivePreview()
+        liveBtn.text = "👁 LIVE"
         link.stop()
         ble.disconnect()
         gps.stop(); gpsRunning = false
@@ -577,8 +626,8 @@ class MainActivity : Activity() {
     private fun cancelConnect() {
         connectJob?.cancel(); connectJob = null
         activeScan?.cancelIfRunning(); activeScan = null
-        wifiJob?.cancel(); wifiJob = null
-        wifiManager.disconnect()
+        stopLivePreview()
+        liveBtn.text = "👁 LIVE"
         ble.disconnect()
         gps.stop(); gpsRunning = false
         setDndMode(false)
