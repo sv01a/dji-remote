@@ -88,6 +88,16 @@ LocationManager (GPS + NETWORK провайдеры), без Google Play Service
 
 ### Camera Power — 0x00/0x1A — СТАТУС: НЕ реализовано (правило #22; только архитектура)
 
+### Wi-Fi Credential Extraction & DUML Subsystem — СТАТУС: реализовано (DumlFrame.kt, CameraWifiManager.kt)
+DJI DUML протокол поверх BLE GATT (write `0xFFF5`, notify `0xFFF4`).
+Кадр: `SOF(0x55) | Len/Ver(2, LE) | CRC8(1) | Sender(1) | Receiver(1) | SEQ(2, LE) | Flags(1) | CmdSet(1) | CmdId(1) | Payload | CRC16(2, LE)`
+- CRC8: reflected poly 0x8C, init 0x77 over bytes 0..2
+- CRC16: reflected poly 0x8408, init 0x3692 over frame minus trailing CRC16
+- `0x07 / 0x07`: GetWifiSsid -> ответ `[status:1][len:1][SSID]`
+- `0x07 / 0x0E`: GetWifiPassword -> ответ `[status:1][len:1][Passphrase]`
+- `0x07 / 0x0C`: GetWifiMac -> ответ `[status:1][6B MAC]`
+Часы подключаются к хотспоту камеры (192.168.2.1) через Android NetworkSpecifier и биндят сетевой стек процесса (`bindProcessToNetwork`) для приёма видеопотока через UDP Datalink (порт 9004).
+
 ## Приоритет источников
 
 Официальное демо > всё остальное (правило #49). Если реальное поведение Osmo 360

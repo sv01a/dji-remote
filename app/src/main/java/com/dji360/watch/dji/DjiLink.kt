@@ -1,6 +1,7 @@
 package com.dji360.watch.dji
 
 import com.dji360.watch.ble.BleClient
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,6 +11,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * DJI R SDK protocol link on top of [BleClient].
@@ -71,6 +73,7 @@ class DjiLink(
 
     // Single in-flight command at a time (rule #37).
     private val cmdMutex = Mutex()
+    private val dumlWaiters = ConcurrentHashMap<Int, CompletableDeferred<DumlFrame>>()
 
     private fun nextSeq(): Int {
         seq = (seq + 1) and 0xFFFF
@@ -100,10 +103,16 @@ class DjiLink(
         lastMode = -1
         _modeName.value = null
         _modeParam.value = null
+        dumlWaiters.values.forEach { it.cancel() }
+        dumlWaiters.clear()
     }
 
     /** Feed one notification; frames never span BLE packets in practice (MTU negotiated). */
     private fun onFrame(bytes: ByteArray) {
+        if (bytes.isNotEmpty() && bytes[0] == DumlFrame.SOF) {
+            onDumlFrame(bytes)
+            return
+        }
         val f = try {
             DjiFrame.parse(bytes)
         } catch (e: DjiFrame.FrameException) {
@@ -126,6 +135,21 @@ class DjiLink(
             f.cmdSet == DjiCommands.CMDSET_CAMERA && f.cmdId == DjiCommands.CMD_NEW_STATUS_PUSH ->
                 parseNewStatusPush(f.payload)
         }
+    }
+
+    private fun onDumlFrame(bytes: ByteArray) {
+        val f = try {
+            DumlFrame.parse(bytes)
+        } catch (e: Exception) {
+            log("DUML RX parse error: ${e.message}")
+            return
+        }
+        log("DUML RX: [0x%02X->0x%02X] cmd=0x%02X/0x%02X seq=%d flags=0x%02X len=%d".format(
+            f.sender, f.receiver, f.cmdSet, f.cmdId, f.seq, f.flags, f.payload.size
+        ))
+        val key = (f.cmdSet shl 8) or f.cmdId
+        val waiter = dumlWaiters.remove(key)
+        waiter?.complete(f)
     }
 
     private fun handleConnectionFrame(f: DjiFrame.Parsed) {
@@ -305,6 +329,72 @@ class DjiLink(
         val ok = r != null && (r.size < 1 || r[0].toInt() == 0)
         log("DJI keyReport(0x%02X) → %s".format(keyCode, if (ok) "OK" else "no/err ack"))
         return ok
+    }
+
+    // ---------- DUML requests (WiFi, liveview, settings) ----------
+
+    suspend fun sendDumlRequest(
+        cmdSet: Int,
+        cmdId: Int,
+        frameBuilder: (seq: Int) -> ByteArray,
+        timeoutMs: Long = 4000
+    ): DumlFrame? = cmdMutex.withLock {
+        if (!ble.isReady) return null
+        val key = (cmdSet shl 8) or cmdId
+        val deferred = CompletableDeferred<DumlFrame>()
+        dumlWaiters[key] = deferred
+        val s = nextSeq()
+        val frame = frameBuilder(s)
+        log("DUML TX: ${DumlFrame.hex(frame)}")
+        val written = ble.write(frame, withResponse = false)
+        if (!written) {
+            dumlWaiters.remove(key)
+            return null
+        }
+        return try {
+            withTimeoutOrNull(timeoutMs) { deferred.await() }
+        } finally {
+            dumlWaiters.remove(key)
+        }
+    }
+
+    suspend fun queryWifiSsid(timeoutMs: Long = 4000): String? {
+        val reply = sendDumlRequest(DumlFrame.CMDSET_WIFI, DumlFrame.CMD_WIFI_GET_SSID, { seq ->
+            DumlFrame.queryWifiSsid(seq)
+        }, timeoutMs) ?: return null
+        return DumlFrame.unpackStatusString(reply.payload)
+    }
+
+    suspend fun queryWifiPassword(timeoutMs: Long = 4000): String? {
+        val reply = sendDumlRequest(DumlFrame.CMDSET_WIFI, DumlFrame.CMD_WIFI_GET_PASSWORD, { seq ->
+            DumlFrame.queryWifiPassword(seq)
+        }, timeoutMs) ?: return null
+        return DumlFrame.unpackStatusString(reply.payload)
+    }
+
+    suspend fun queryWifiMac(timeoutMs: Long = 4000): String? {
+        val reply = sendDumlRequest(DumlFrame.CMDSET_WIFI, DumlFrame.CMD_WIFI_GET_MAC, { seq ->
+            DumlFrame.queryWifiMac(seq)
+        }, timeoutMs) ?: return null
+        if (reply.payload.size >= 7 && reply.payload[0] == 0.toByte()) {
+            return reply.payload.copyOfRange(1, 7).joinToString(":") { "%02X".format(it) }
+        }
+        return null
+    }
+
+    suspend fun queryWifiCredentials(timeoutMs: Long = 8000): Pair<String, String>? {
+        log("DJI: Querying camera Wi-Fi SSID over BLE...")
+        val ssid = queryWifiSsid(timeoutMs / 2)
+        if (ssid == null) {
+            log("DJI: No Wi-Fi SSID reply from camera")
+            return null
+        }
+        log("DJI: Camera Wi-Fi SSID = '$ssid'")
+        kotlinx.coroutines.delay(200) // Settle BLE GATT queue between writes
+        log("DJI: Querying camera Wi-Fi password over BLE...")
+        val password = queryWifiPassword(timeoutMs / 2) ?: ""
+        log("DJI: Camera Wi-Fi password received (len=${password.length})")
+        return ssid to password
     }
 
     // ---------- parsers (layouts from dji_protocol_data_structures.h) ----------

@@ -24,6 +24,7 @@ import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
 import com.dji360.watch.gps.GpsPusher
+import com.dji360.watch.wifi.CameraWifiManager
 import kotlinx.coroutines.CoroutineScope
 import java.lang.Class
 import kotlinx.coroutines.Dispatchers
@@ -54,12 +55,15 @@ class MainActivity : Activity() {
     private lateinit var gpsIcon: TextView
     private lateinit var coordText: TextView
     private lateinit var disconnectBtn: Button
+    private lateinit var liveBtn: Button
 
     private lateinit var ble: BleClient
     private lateinit var link: DjiLink
+    private lateinit var wifiManager: CameraWifiManager
     private val uiScope = CoroutineScope(Dispatchers.Main)
     private var uiJob: Job? = null
     private var connectJob: Job? = null
+    private var wifiJob: Job? = null
     private var reconnectAttempt = 0
     private lateinit var gps: GpsPusher
     private var gpsRunning = false
@@ -99,6 +103,7 @@ class MainActivity : Activity() {
         val macBytes = mac.split(":").mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
         link = DjiLink(ble, uiScope, macBytes) { msg -> android.util.Log.d("DJIRemote", msg) }
         link.start()
+        wifiManager = CameraWifiManager(applicationContext) { msg -> android.util.Log.d("DJIRemote", msg) }
         gps = GpsPusher(applicationContext, link, uiScope, { msg -> android.util.Log.d("DJIRemote", msg) }, { sats ->
             satCount = sats
         }, onFixState = { fixed -> gpsFix = fixed }, onLocation = { lat, lng ->
@@ -136,7 +141,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         setDndMode(false)
-        uiJob?.cancel(); connectJob?.cancel()
+        uiJob?.cancel(); connectJob?.cancel(); wifiJob?.cancel()
+        wifiManager.disconnect()
         gps.stop()
         link.stop()
         ble.disconnect()
@@ -252,6 +258,12 @@ class MainActivity : Activity() {
         ).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.END; marginEnd = dp(8) })
 
         // ---- BOTTOM: recording timer + current mode ----
+        liveBtn = pill("👁 LIVE") { onLiveButton() }
+        liveBtn.visibility = View.GONE
+        root.addView(liveBtn, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL; bottomMargin = dp(46) })
+
         bigText = TextView(this).apply {
             textSize = sp(20f); setTypeface(typeface, Typeface.BOLD)
             setTextColor(Color.WHITE); gravity = Gravity.CENTER
@@ -351,6 +363,16 @@ class MainActivity : Activity() {
         val sideVisible = ui == Ui.READY || ui == Ui.RECORDING
         qsBtn.visibility = if (sideVisible) View.VISIBLE else View.GONE
         disconnectBtn.visibility = if (sideVisible) View.VISIBLE else View.GONE
+
+        // LIVE / Viewfinder button (visible when ready and not recording)
+        if (ui == Ui.READY) {
+            liveBtn.visibility = View.VISIBLE
+            if (wifiJob?.isActive != true) {
+                liveBtn.text = if (wifiManager.isConnected) "🟢 AP" else "👁 LIVE"
+            }
+        } else {
+            liveBtn.visibility = View.GONE
+        }
     }
 
     private fun restyleMain(label: String, color: Int, textColor: Int) {
@@ -504,9 +526,45 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun onLiveButton() {
+        if (wifiManager.isConnected) {
+            wifiJob?.cancel(); wifiJob = null
+            wifiManager.disconnect()
+            liveBtn.text = "👁 LIVE"
+            Diagnostics.shortBuzz(applicationContext)
+            return
+        }
+        liveBtn.text = "📶..."
+        wifiJob?.cancel()
+        wifiJob = uiScope.launch {
+            val creds = link.queryWifiCredentials()
+            if (creds == null) {
+                Diagnostics.doubleBuzz(applicationContext)
+                liveBtn.text = "👁 ERR"
+                delay(1500)
+                liveBtn.text = "👁 LIVE"
+                return@launch
+            }
+            val (ssid, pass) = creds
+            liveBtn.text = "🔗..."
+            val ok = wifiManager.connectToCameraAp(ssid, pass)
+            if (ok) {
+                Diagnostics.shortBuzz(applicationContext)
+                liveBtn.text = "🟢 AP"
+            } else {
+                Diagnostics.doubleBuzz(applicationContext)
+                liveBtn.text = "❌ WIFI"
+                delay(2000)
+                liveBtn.text = "👁 LIVE"
+            }
+        }
+    }
+
     private fun onDisc() {
         connectJob?.cancel(); connectJob = null
         activeScan?.cancelIfRunning(); activeScan = null
+        wifiJob?.cancel(); wifiJob = null
+        wifiManager.disconnect()
         link.stop()
         ble.disconnect()
         gps.stop(); gpsRunning = false
@@ -519,6 +577,8 @@ class MainActivity : Activity() {
     private fun cancelConnect() {
         connectJob?.cancel(); connectJob = null
         activeScan?.cancelIfRunning(); activeScan = null
+        wifiJob?.cancel(); wifiJob = null
+        wifiManager.disconnect()
         ble.disconnect()
         gps.stop(); gpsRunning = false
         setDndMode(false)
