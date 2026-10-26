@@ -24,14 +24,12 @@ import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
 import com.dji360.watch.gps.GpsPusher
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import java.lang.Class
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 /**
@@ -537,45 +535,37 @@ class MainActivity : Activity() {
         connectJob = uiScope.launch {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val lastMac = prefs.getString(PREFS_LAST_MAC, null)
-            val targetFound = CompletableDeferred<Pair<String, Diagnostics.DevRow>>()
 
             val test = Diagnostics.BleScanTest(applicationContext)
             activeScan = test
-            test.onTargetFound = { addr, devRow ->
-                if (lastMac != null && addr.equals(lastMac, ignoreCase = true)) {
-                    targetFound.complete(addr to devRow)
-                }
-            }
-
-            // If we have a saved MAC, fast targeted scan window; otherwise full 4s scan
-            val maxScanMs = if (lastMac != null) 3500L else 4000L
-            test.start(maxScanMs, targetMac = lastMac, Diagnostics.BleScanTest.Listener(
+            val scanMs = 3500L
+            test.start(scanMs, targetMac = lastMac, Diagnostics.BleScanTest.Listener(
                 onProgress = { },
                 onFinished = { _ -> }
             ))
 
-            // If we know the camera MAC, wait up to 2.0s for its advertisement
-            val earlyTarget = if (lastMac != null) {
-                runCatching { withTimeoutOrNull(2000L) { targetFound.await() } }.getOrNull()
-            } else null
-
+            // Allow scan to collect BLE advertisement packets
+            delay(scanMs + 100)
             test.cancelIfRunning()
             activeScan = null
             // Crucial for BLE stability: give radio 250ms to finish scan teardown before connectGatt
             delay(250)
 
-            val finalTarget = earlyTarget ?: run {
-                val dji = test.djiCandidates()
-                dji.entries.maxByOrNull { it.value.rssi }?.let { it.key to it.value }
-            }
-
-            if (finalTarget == null) {
+            val dji = test.djiCandidates()
+            if (dji.isEmpty()) {
                 Diagnostics.doubleBuzz(applicationContext)
                 render(Ui.FAILED, DjiLink.CameraState())
                 return@launch
             }
 
-            val (targetMac, best) = finalTarget
+            // Prefer last connected camera if present in scan results, otherwise pick strongest signal
+            val (targetMac, best) = if (lastMac != null && dji.containsKey(lastMac)) {
+                lastMac to dji[lastMac]!!
+            } else {
+                val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
+                bestEntry.key to bestEntry.value
+            }
+
             val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
             val dev = ad?.getRemoteDevice(targetMac)
             if (dev == null) {
