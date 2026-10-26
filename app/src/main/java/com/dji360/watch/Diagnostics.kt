@@ -127,7 +127,6 @@ object Diagnostics {
         private val rows = LinkedHashMap<String, DevRow>()
         private var listener: Listener? = null
         private var running = false
-        var onCandidate: ((String, DevRow) -> Unit)? = null
 
         @SuppressLint("MissingPermission") // caller guarantees runtime grants
         fun start(durationMs: Long, l: Listener): Boolean {
@@ -187,9 +186,6 @@ object Diagnostics {
                 }
             }
             r.scanRecord?.serviceUuids?.forEach { u -> row.svcs += u.uuid.toString().uppercase(Locale.US) }
-            if (row.isDji) {
-                onCandidate?.invoke(r.device.address, row)
-            }
         }
 
         @SuppressLint("MissingPermission")
