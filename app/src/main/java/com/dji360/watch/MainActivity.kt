@@ -24,12 +24,14 @@ import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
 import com.dji360.watch.gps.GpsPusher
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import java.lang.Class
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 /**
@@ -533,28 +535,49 @@ class MainActivity : Activity() {
             askPermissionsIfRequired(); return
         }
         connectJob = uiScope.launch {
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            val lastMac = prefs.getString(PREFS_LAST_MAC, null)
+            val targetFound = CompletableDeferred<Pair<String, Diagnostics.DevRow>>()
+
             val test = Diagnostics.BleScanTest(applicationContext)
             activeScan = test
-            test.start(4000, Diagnostics.BleScanTest.Listener(
+            test.onTargetFound = { addr, devRow ->
+                if (lastMac != null && addr.equals(lastMac, ignoreCase = true)) {
+                    targetFound.complete(addr to devRow)
+                }
+            }
+
+            // If we have a saved MAC, fast targeted scan window; otherwise full 4s scan
+            val maxScanMs = if (lastMac != null) 3500L else 4000L
+            test.start(maxScanMs, targetMac = lastMac, Diagnostics.BleScanTest.Listener(
                 onProgress = { },
                 onFinished = { _ -> }
             ))
-            delay(4100)
+
+            // If we know the camera MAC, wait up to 2.0s for its advertisement
+            val earlyTarget = if (lastMac != null) {
+                runCatching { withTimeoutOrNull(2000L) { targetFound.await() } }.getOrNull()
+            } else null
+
             test.cancelIfRunning()
             activeScan = null
             // Crucial for BLE stability: give radio 250ms to finish scan teardown before connectGatt
             delay(250)
 
-            val dji = test.djiCandidates()
-            if (dji.isEmpty()) {
+            val finalTarget = earlyTarget ?: run {
+                val dji = test.djiCandidates()
+                dji.entries.maxByOrNull { it.value.rssi }?.let { it.key to it.value }
+            }
+
+            if (finalTarget == null) {
                 Diagnostics.doubleBuzz(applicationContext)
                 render(Ui.FAILED, DjiLink.CameraState())
                 return@launch
             }
-            val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
-            val best = bestEntry.value
+
+            val (targetMac, best) = finalTarget
             val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-            val dev = ad?.getRemoteDevice(bestEntry.key)
+            val dev = ad?.getRemoteDevice(targetMac)
             if (dev == null) {
                 render(Ui.FAILED, DjiLink.CameraState()); return@launch
             }
@@ -567,11 +590,12 @@ class MainActivity : Activity() {
             // First-ever successful connection → verify_mode=1 (camera shows the
             // confirmation popup once). Every later connection uses verify_mode=0
             // so the camera decides by its saved pairing history.
-            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val firstPairing = !prefs.getBoolean(PREFS_PAIRED, false)
             val ok = link.handshake(firstPairing = firstPairing)
             if (ok) {
-                prefs.edit().putBoolean(PREFS_PAIRED, true).apply()
+                prefs.edit().putBoolean(PREFS_PAIRED, true)
+                    .putString(PREFS_LAST_MAC, targetMac)
+                    .apply()
                 reconnectAttempt = 0
                 if (!gpsRunning) { gps.start(); gpsRunning = true }
                 Diagnostics.shortBuzz(applicationContext)
@@ -603,5 +627,6 @@ class MainActivity : Activity() {
         const val REQ_PERM = 41
         const val PREFS = "dji_remote"
         const val PREFS_PAIRED = "paired_once"
+        const val PREFS_LAST_MAC = "last_mac"
     }
 }

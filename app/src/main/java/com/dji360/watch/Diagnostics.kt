@@ -127,9 +127,10 @@ object Diagnostics {
         private val rows = LinkedHashMap<String, DevRow>()
         private var listener: Listener? = null
         private var running = false
+        var onTargetFound: ((String, DevRow) -> Unit)? = null
 
         @SuppressLint("MissingPermission") // caller guarantees runtime grants
-        fun start(durationMs: Long, l: Listener): Boolean {
+        fun start(durationMs: Long, targetMac: String? = null, l: Listener): Boolean {
             this.listener = l
             val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
             val scanner = adapter?.bluetoothLeScanner ?: run {
@@ -170,7 +171,8 @@ object Diagnostics {
         }
 
         private fun record(r: ScanResult) {
-            val row = rows.getOrPut(r.device.address) {
+            val addr = r.device.address
+            val row = rows.getOrPut(addr) {
                 try { DevRow(r.scanRecord?.deviceName ?: r.device.name, r.rssi) }
                 catch (_: SecurityException) { DevRow(null, r.rssi) }
             }
@@ -186,6 +188,9 @@ object Diagnostics {
                 }
             }
             r.scanRecord?.serviceUuids?.forEach { u -> row.svcs += u.uuid.toString().uppercase(Locale.US) }
+            if (row.isDji) {
+                onTargetFound?.invoke(addr, row)
+            }
         }
 
         @SuppressLint("MissingPermission")
