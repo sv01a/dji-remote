@@ -40,27 +40,43 @@ class CameraWifiManager(
         password: String,
         timeoutMs: Long = 20_000
     ): Boolean {
+        // Try WPA2 first; if rejected/unavailable and Q+, fallback to WPA3-SAE
+        var ok = attemptConnect(ssid, password, isWpa3 = false, timeoutMs = timeoutMs / 2)
+        if (!ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && password.isNotEmpty()) {
+            log("WiFi: WPA2 attempt not completed, trying WPA3-SAE...")
+            ok = attemptConnect(ssid, password, isWpa3 = true, timeoutMs = timeoutMs / 2)
+        }
+        return ok
+    }
+
+    private suspend fun attemptConnect(
+        ssid: String,
+        password: String,
+        isWpa3: Boolean,
+        timeoutMs: Long
+    ): Boolean {
         disconnect()
-        log("WiFi: Connecting to camera AP SSID='$ssid' (timeout ${timeoutMs / 1000}s)...")
+        val sec = if (isWpa3) "WPA3-SAE" else "WPA2"
+        log("WiFi: Connecting to camera AP SSID="" + ssid + "" (" + sec + ", timeout " + (timeoutMs / 1000) + "s)...")
 
         val deferred = CompletableDeferred<Boolean>()
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                log("WiFi: Camera network available: $network")
+                log("WiFi: Camera network available: " + network)
                 activeNetwork = network
                 val bound = cm.bindProcessToNetwork(network)
-                log("WiFi: Process bound to camera network: $bound")
+                log("WiFi: Process bound to camera network: " + bound)
                 deferred.complete(true)
             }
 
             override fun onUnavailable() {
-                log("WiFi: Camera network unavailable / rejected by user")
+                log("WiFi: Camera network unavailable / rejected")
                 deferred.complete(false)
             }
 
             override fun onLost(network: Network) {
-                log("WiFi: Camera network lost: $network")
+                log("WiFi: Camera network lost: " + network)
                 if (activeNetwork == network) {
                     activeNetwork = null
                     runCatching { cm.bindProcessToNetwork(null) }
@@ -72,7 +88,11 @@ class CameraWifiManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val specifierBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
             if (password.isNotEmpty()) {
-                specifierBuilder.setWpa2Passphrase(password)
+                if (isWpa3) {
+                    specifierBuilder.setWpa3SaePassphrase(password)
+                } else {
+                    specifierBuilder.setWpa2Passphrase(password)
+                }
             }
             val specifier = specifierBuilder.build()
 
@@ -85,19 +105,18 @@ class CameraWifiManager(
             try {
                 cm.requestNetwork(request, callback)
             } catch (e: Exception) {
-                log("WiFi: requestNetwork failed: ${e.message}")
+                log("WiFi: requestNetwork failed: " + e.message)
                 disconnect()
                 return false
             }
         } else {
-            // For older Android / compat layers
             log("WiFi: SDK < Q not supported for WifiNetworkSpecifier")
             return false
         }
 
         val success = runCatching { withTimeoutOrNull(timeoutMs) { deferred.await() } }.getOrNull() == true
         if (!success) {
-            log("WiFi: Connection timed out or failed")
+            log("WiFi: " + sec + " connection timed out or failed")
             disconnect()
         }
         return success

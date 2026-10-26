@@ -22,6 +22,8 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.EditText
+import android.app.AlertDialog
 import com.dji360.watch.ble.BleClient
 import com.dji360.watch.dji.DjiCommands
 import com.dji360.watch.dji.DjiLink
@@ -288,6 +290,7 @@ class MainActivity : Activity() {
 
         // ---- BOTTOM: recording timer + current mode ----
         liveBtn = pill("👁 LIVE") { onLiveButton() }
+        liveBtn.setOnLongClickListener { showWifiConfigDialog(); true }
         liveBtn.visibility = View.GONE
         root.addView(liveBtn, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -562,19 +565,38 @@ class MainActivity : Activity() {
             Diagnostics.shortBuzz(applicationContext)
             return
         }
+
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val savedSsid = prefs.getString(PREFS_WIFI_SSID, null)
+        val savedPass = prefs.getString(PREFS_WIFI_PASS, null)
+        val targetSsid = savedSsid?.takeIf { it.isNotEmpty() }
+            ?: link.deviceName.takeIf { it.isNotEmpty() && it != "Osmo" }
+            ?: "Osmo360"
+
+        if (!savedPass.isNullOrEmpty()) {
+            connectWifiAndStartStream(targetSsid, savedPass)
+            return
+        }
+
         liveBtn.text = "📶..."
         wifiJob?.cancel()
         wifiJob = uiScope.launch {
-            val creds = link.queryWifiCredentials()
-            if (creds == null) {
-                Diagnostics.doubleBuzz(applicationContext)
-                liveBtn.text = "👁 ERR"
-                delay(1500)
+            val creds = link.queryWifiCredentials(timeoutMs = 2000)
+            if (creds != null) {
+                val (ssid, pass) = creds
+                prefs.edit().putString(PREFS_WIFI_SSID, ssid).putString(PREFS_WIFI_PASS, pass).apply()
+                connectWifiAndStartStream(ssid, pass)
+            } else {
                 liveBtn.text = "👁 LIVE"
-                return@launch
+                showWifiConfigDialog(targetSsid)
             }
-            val (ssid, pass) = creds
-            liveBtn.text = "🔗..."
+        }
+    }
+
+    private fun connectWifiAndStartStream(ssid: String, pass: String) {
+        liveBtn.text = "🔗..."
+        wifiJob?.cancel()
+        wifiJob = uiScope.launch {
             val ok = wifiManager.connectToCameraAp(ssid, pass)
             if (ok) {
                 Diagnostics.shortBuzz(applicationContext)
@@ -587,6 +609,68 @@ class MainActivity : Activity() {
                 liveBtn.text = "👁 LIVE"
             }
         }
+    }
+
+    private fun showWifiConfigDialog(defaultSsid: String = "") {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val currentSsid = prefs.getString(PREFS_WIFI_SSID, null)
+            ?: defaultSsid.takeIf { it.isNotEmpty() }
+            ?: link.deviceName.takeIf { it.isNotEmpty() && it != "Osmo" }
+            ?: "Osmo360"
+        val currentPass = prefs.getString(PREFS_WIFI_PASS, "") ?: ""
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(8))
+        }
+
+        val ssidLabel = TextView(this).apply {
+            text = "SSID (Wi-Fi камеры):"
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+        }
+        val ssidInput = EditText(this).apply {
+            setText(currentSsid)
+            setTextColor(Color.WHITE)
+            setSingleLine()
+        }
+
+        val passLabel = TextView(this).apply {
+            text = "Пароль (с экрана камеры):"
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, dp(8), 0, 0)
+        }
+        val passInput = EditText(this).apply {
+            setText(currentPass)
+            hint = "Пароль из меню камеры"
+            setHintTextColor(Color.DKGRAY)
+            setTextColor(Color.WHITE)
+            setSingleLine()
+        }
+
+        layout.addView(ssidLabel)
+        layout.addView(ssidInput)
+        layout.addView(passLabel)
+        layout.addView(passInput)
+
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Wi-Fi камеры")
+            .setMessage("На камере: Настройки → Беспроводное подключение")
+            .setView(layout)
+            .setPositiveButton("Подключить") { _, _ ->
+                val s = ssidInput.text.toString().trim()
+                val p = passInput.text.toString().trim()
+                if (s.isNotEmpty()) {
+                    prefs.edit()
+                        .putString(PREFS_WIFI_SSID, s)
+                        .putString(PREFS_WIFI_PASS, p)
+                        .apply()
+                    connectWifiAndStartStream(s, p)
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     private fun startLiveStream() {
@@ -716,7 +800,14 @@ class MainActivity : Activity() {
         checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     private fun currentPermList(): List<String> =
-        if (Build.VERSION.SDK_INT >= 31)
+        if (Build.VERSION.SDK_INT >= 33)
+            listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            )
+        else if (Build.VERSION.SDK_INT >= 31)
             listOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
@@ -729,5 +820,7 @@ class MainActivity : Activity() {
         const val PREFS = "dji_remote"
         const val PREFS_PAIRED = "paired_once"
         const val PREFS_LAST_MAC = "last_mac"
+        const val PREFS_WIFI_SSID = "wifi_ssid"
+        const val PREFS_WIFI_PASS = "wifi_pass"
     }
 }
