@@ -136,11 +136,15 @@ class DatalinkClient(
             openTcpPoke()
 
             try {
-                val s = DatagramSocket(null)
-                network?.bindSocket(s)
-                s.bind(InetSocketAddress(0))
+                val s = DatagramSocket(0)
+                try {
+                    network?.bindSocket(s)
+                    log("Datalink: Bound DatagramSocket to network successfully")
+                } catch (e: Exception) {
+                    log("Datalink: bindSocket warning: ${e.message}")
+                }
                 socket = s
-                log("Datalink: Local UDP socket bound to port ${s.localPort} (bound to network: ${network != null})")
+                log("Datalink: Local UDP socket bound to port ${s.localPort}")
 
                 baseSeq = (Random().nextInt(0x7F00) and 0xFFF8) or 0x0008
                 sessionId = Random().nextInt(0xFFFF)
@@ -154,13 +158,24 @@ class DatalinkClient(
 
                 delay(200)
 
+                sendLiveGate()
                 sendLiveEntryPrep()
-
                 sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
                 sendLiveViewEnable(0x41)
 
                 startAckPump()
                 startHeartbeat()
+
+                // Kickstart retry at 2s if no video packets received yet
+                launch(Dispatchers.IO) {
+                    delay(2000)
+                    if (isRunning && latestVideoSeq == 0) {
+                        log("Datalink: No video packets after 2s, resending LiveView enable burst...")
+                        sendLiveGate()
+                        sendLiveViewEnable(0x41)
+                        sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
+                    }
+                }
 
             } catch (e: Exception) {
                 log("Datalink: Start error: ${e.message}")
@@ -190,7 +205,11 @@ class DatalinkClient(
     private fun openTcpPoke() {
         try {
             val s = Socket()
-            network?.bindSocket(s)
+            try {
+                network?.bindSocket(s)
+            } catch (e: Exception) {
+                log("Datalink: TCP bindSocket warning: ${e.message}")
+            }
             s.connect(InetSocketAddress(cameraIp, CAMERA_TCP_POKE_PORT), 1500)
             tcpSocket = s
             log("Datalink: TCP 7001 connected and held open")
@@ -245,6 +264,19 @@ class DatalinkClient(
         } catch (e: Exception) {
             log("Datalink: UDP send error: ${e.message}")
         }
+    }
+
+    private fun sendLiveGate() {
+        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        val payload = byteArrayOf(0x00, 0x00, 0x00, 0x03)
+        val dumlFrame = DumlFrame.build(
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.FLAG_REQUEST, 0x02, 0x09,
+            payload
+        )
+        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
+        sendUdp(datagram)
+        log("Datalink: Sent Live Gate (0x02/0x09)")
     }
 
     private fun sendLiveEntryPrep() {

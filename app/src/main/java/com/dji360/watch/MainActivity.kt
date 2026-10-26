@@ -560,10 +560,16 @@ class MainActivity : Activity() {
     }
 
     private fun onLiveButton() {
-        if (wifiManager.isConnected || datalinkClient?.isRunning == true) {
+        if (datalinkClient?.isRunning == true) {
             stopLivePreview()
             liveBtn.text = "👁 LIVE"
             Diagnostics.shortBuzz(applicationContext)
+            return
+        }
+
+        if (wifiManager.isConnected) {
+            liveBtn.text = "⏳ Стрим..."
+            startLiveStream()
             return
         }
 
@@ -595,13 +601,13 @@ class MainActivity : Activity() {
     }
 
     private fun connectWifiAndStartStream(ssid: String, pass: String) {
-        liveBtn.text = "🔗..."
+        liveBtn.text = "🔗 Wi-Fi..."
         wifiJob?.cancel()
         wifiJob = uiScope.launch {
             val ok = wifiManager.connectToCameraAp(ssid, pass)
             if (ok) {
                 Diagnostics.shortBuzz(applicationContext)
-                liveBtn.text = "🔴 LIVE"
+                liveBtn.text = "⏳ Стрим..."
                 startLiveStream()
             } else {
                 Diagnostics.doubleBuzz(applicationContext)
@@ -677,6 +683,7 @@ class MainActivity : Activity() {
     private fun startLiveStream() {
         surfaceView.visibility = View.VISIBLE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
+        liveBtn.text = "⏳ Стрим..."
         datalinkClient?.stop()
         val net = wifiManager.activeNetwork
         val ip = wifiManager.getGatewayIp()
@@ -705,7 +712,7 @@ class MainActivity : Activity() {
         decoder?.stop(); decoder = null
         surfaceView.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
-        wifiManager.disconnect()
+        liveBtn.text = "👁 LIVE"
     }
 
     private fun onDisc() {

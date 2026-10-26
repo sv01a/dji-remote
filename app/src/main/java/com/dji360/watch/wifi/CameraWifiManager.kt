@@ -58,13 +58,19 @@ class CameraWifiManager(
     suspend fun connectToCameraAp(
         ssid: String,
         password: String,
-        timeoutMs: Long = 20_000
+        timeoutMs: Long = 25_000
     ): Boolean {
-        // Try WPA2 first; if rejected/unavailable and Q+, fallback to WPA3-SAE
-        var ok = attemptConnect(ssid, password, isWpa3 = false, timeoutMs = timeoutMs / 2)
+        // If already connected, reuse existing network directly without disconnecting
+        if (activeNetwork != null) {
+            log("WiFi: Already connected to camera network: $activeNetwork")
+            return true
+        }
+
+        // Try WPA2 first with full 20s timeout
+        var ok = attemptConnect(ssid, password, isWpa3 = false, timeoutMs = 20_000)
         if (!ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && password.isNotEmpty()) {
-            log("WiFi: WPA2 attempt not completed, trying WPA3...")
-            ok = attemptConnect(ssid, password, isWpa3 = true, timeoutMs = timeoutMs / 2)
+            log("WiFi: WPA2 attempt failed/timed out, trying WPA3...")
+            ok = attemptConnect(ssid, password, isWpa3 = true, timeoutMs = 15_000)
         }
         return ok
     }
