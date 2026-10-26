@@ -505,7 +505,8 @@ class MainActivity : Activity() {
     }
 
     private fun onDisc() {
-        connectJob?.cancel()
+        connectJob?.cancel(); connectJob = null
+        activeScan?.cancelIfRunning(); activeScan = null
         link.stop()
         ble.disconnect()
         gps.stop(); gpsRunning = false
@@ -532,6 +533,7 @@ class MainActivity : Activity() {
         if (!currentPermList().all { granted(it) }) {
             askPermissionsIfRequired(); return
         }
+        link.start()
         connectJob = uiScope.launch {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             val lastMac = prefs.getString(PREFS_LAST_MAC, null)

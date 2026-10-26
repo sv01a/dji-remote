@@ -155,6 +155,7 @@ class DjiLink(
                 )
                 scope.launch {
                     ble.write(ack, withResponse = false)
+                    kotlinx.coroutines.delay(200)
                     log("DJI: PROTOCOL_CONNECTED (device_id=0x%04X)".format(cameraDeviceId))
                     _phase.value = Phase.CONNECTED
                     subscribeStatus()
@@ -178,7 +179,8 @@ class DjiLink(
      * firstPairing=true → verify_mode=1 (camera shows code popup);
      * false → verify_mode=0 (decide by saved pairing history).
      */
-    suspend fun handshake(firstPairing: Boolean, timeoutMs: Long = 30_000): Boolean {
+    suspend fun handshake(firstPairing: Boolean, timeoutMs: Long = 10_000): Boolean {
+        start() // Ensure notification collection is active
         if (!ble.isReady) {
             log("DJI: BLE not ready")
             return false
@@ -221,6 +223,11 @@ class DjiLink(
         scope.launch {
             log("DJI TX sub: ${DjiFrame.hex(frame)}")
             ble.write(frame, withResponse = false)
+            // Retry once after 500ms to guarantee camera receives subscription
+            kotlinx.coroutines.delay(500)
+            if (_phase.value == Phase.CONNECTED) {
+                ble.write(frame, withResponse = false)
+            }
         }
     }
 
