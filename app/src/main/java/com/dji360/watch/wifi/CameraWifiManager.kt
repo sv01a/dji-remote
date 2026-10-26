@@ -57,7 +57,7 @@ class CameraWifiManager(
     ): Boolean {
         disconnect()
         val sec = if (isWpa3) "WPA3" else "WPA2"
-        log("WiFi: Connecting to camera AP SSID="" + ssid + "" (" + sec + ", timeout " + (timeoutMs / 1000) + "s)...")
+        log("WiFi: Connecting to camera AP SSID='$ssid' ($sec, timeout ${timeoutMs / 1000}s)...")
 
         val deferred = CompletableDeferred<Boolean>()
 

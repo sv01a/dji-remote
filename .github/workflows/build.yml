@@ -34,7 +34,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testDebugUnitTest --stacktrace || (find app/build/reports -name "*.xml" -exec cat {} + && exit 1)
 
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
