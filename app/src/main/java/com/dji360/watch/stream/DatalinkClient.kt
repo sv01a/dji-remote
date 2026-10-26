@@ -42,6 +42,94 @@ class DatalinkClient(
         const val PKT_ACKED_DATA: Byte = 0x03
         const val PKT_ACK: Byte = 0x04
         const val PKT_COMMAND: Byte = 0x05
+        /**
+         * 8-byte transport header: [u16le 0x8000 | (8+len)][sessionId][seq][pktType][xor]
+         */
+        fun transportHeader(pktType: Int, payloadLen: Int, sessionId: Int, seq: Int): ByteArray {
+            return transportHeader(pktType.toByte(), payloadLen, sessionId, seq)
+        }
+
+        fun transportHeader(pktType: Byte, payloadLen: Int, sessionId: Int, seq: Int): ByteArray {
+            val total = 8 + payloadLen
+            val w0 = 0x8000 or (total and 0x3FFF)
+            val b = ByteArray(8)
+            b[0] = (w0 and 0xFF).toByte()
+            b[1] = ((w0 ushr 8) and 0xFF).toByte()
+            b[2] = (sessionId and 0xFF).toByte()
+            b[3] = ((sessionId ushr 8) and 0xFF).toByte()
+            b[4] = (seq and 0xFF).toByte()
+            b[5] = ((seq ushr 8) and 0xFF).toByte()
+            b[6] = pktType
+            var xor = 0
+            for (i in 0 until 7) {
+                xor = xor xor (b[i].toInt() and 0xFF)
+            }
+            b[7] = (xor and 0xFF).toByte()
+            return b
+        }
+
+        /**
+         * 12-byte routing header for command packet (pktType = 0x05).
+         */
+        fun routingHeader(seq: Int, cmdCounter: Int = 1): ByteArray {
+            val ack = (seq - 8) and 0xFFFF
+            val b = ByteArray(12)
+            b[0] = (ack and 0xFF).toByte()
+            b[1] = ((ack ushr 8) and 0xFF).toByte()
+            b[2] = (seq and 0xFF).toByte()
+            b[3] = ((seq ushr 8) and 0xFF).toByte()
+            // 4..7 remain 0
+            b[8] = (cmdCounter and 0xFF).toByte()
+            b[9] = 0x01
+            b[10] = 0x00
+            b[11] = 0x00
+            return b
+        }
+
+        /**
+         * Wrap a DUML frame in a complete UDP Datalink command packet.
+         */
+        fun wrapCommand(dumlFrame: ByteArray, sessionId: Int, seq: Int): ByteArray {
+            val routing = routingHeader(seq)
+            val payload = routing + dumlFrame
+            val header = transportHeader(PKT_COMMAND, payload.size, sessionId, seq)
+            return header + payload
+        }
+
+        /**
+         * 48-byte Handshake packet (8-byte transport + 40-byte payload).
+         */
+        fun buildHandshakePacket(sessionId: Int, seq: Int, baseSeq: Int): ByteArray {
+            val payload = ByteArray(40)
+            val template = byteArrayOf(
+                0x00, 0x00, 0x64, 0x00, 0x64, 0x00, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x00,
+                0x01, 0x90.toByte(), 0x01, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x14, 0x00,
+                0x64, 0x00, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x01, 0x01, 0x04, 0x01, 0x02
+            )
+            template.copyInto(payload)
+            payload[0] = (baseSeq and 0xFF).toByte()
+            payload[1] = ((baseSeq ushr 8) and 0xFF).toByte()
+
+            val header = transportHeader(PKT_HANDSHAKE, payload.size, sessionId, seq)
+            return header + payload
+        }
+
+        /**
+         * 34-byte Window ACK packet (8-byte transport + 26-byte payload).
+         */
+        fun buildAckPacket(sessionId: Int, seq: Int, videoCursor: Int, baseSeq: Int): ByteArray {
+            fun grp(v: Int): ByteArray {
+                val b = ByteArray(8)
+                b[0] = (v and 0xFF).toByte()
+                b[1] = ((v ushr 8) and 0xFF).toByte()
+                b[2] = (v and 0xFF).toByte()
+                b[3] = ((v ushr 8) and 0xFF).toByte()
+                return b
+            }
+            val payload = grp(videoCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
+            val header = transportHeader(PKT_ACK, payload.size, sessionId, seq)
+            return header + payload
+        }
     }
 
     private var socket: DatagramSocket? = null
@@ -246,90 +334,4 @@ class DatalinkClient(
         }
     }
 
-    companion object Helper {
-        /**
-         * 8-byte transport header: [u16le 0x8000 | (8+len)][sessionId][seq][pktType][xor]
-         */
-        fun transportHeader(pktType: Byte, payloadLen: Int, sessionId: Int, seq: Int): ByteArray {
-            val total = 8 + payloadLen
-            val w0 = 0x8000 or (total and 0x3FFF)
-            val b = ByteArray(8)
-            b[0] = (w0 and 0xFF).toByte()
-            b[1] = ((w0 ushr 8) and 0xFF).toByte()
-            b[2] = (sessionId and 0xFF).toByte()
-            b[3] = ((sessionId ushr 8) and 0xFF).toByte()
-            b[4] = (seq and 0xFF).toByte()
-            b[5] = ((seq ushr 8) and 0xFF).toByte()
-            b[6] = pktType
-            var xor = 0
-            for (i in 0 until 7) {
-                xor = xor xor (b[i].toInt() and 0xFF)
-            }
-            b[7] = (xor and 0xFF).toByte()
-            return b
-        }
-
-        /**
-         * 12-byte routing header for command packet (pktType = 0x05).
-         */
-        fun routingHeader(seq: Int, cmdCounter: Int = 1): ByteArray {
-            val ack = (seq - 8) and 0xFFFF
-            val b = ByteArray(12)
-            b[0] = (ack and 0xFF).toByte()
-            b[1] = ((ack ushr 8) and 0xFF).toByte()
-            b[2] = (seq and 0xFF).toByte()
-            b[3] = ((seq ushr 8) and 0xFF).toByte()
-            // 4..7 remain 0
-            b[8] = (cmdCounter and 0xFF).toByte()
-            b[9] = 0x01
-            b[10] = 0x00
-            b[11] = 0x00
-            return b
-        }
-
-        /**
-         * Wrap a DUML frame in a complete UDP Datalink command packet.
-         */
-        fun wrapCommand(dumlFrame: ByteArray, sessionId: Int, seq: Int): ByteArray {
-            val routing = routingHeader(seq)
-            val payload = routing + dumlFrame
-            val header = transportHeader(PKT_COMMAND, payload.size, sessionId, seq)
-            return header + payload
-        }
-
-        /**
-         * 48-byte Handshake packet (8-byte transport + 40-byte payload).
-         */
-        fun buildHandshakePacket(sessionId: Int, seq: Int, baseSeq: Int): ByteArray {
-            val payload = ByteArray(40)
-            val template = byteArrayOf(
-                0x00, 0x00, 0x64, 0x00, 0x64, 0x00, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x00,
-                0x01, 0x90.toByte(), 0x01, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x14, 0x00,
-                0x64, 0x00, 0xC0.toByte(), 0x05, 0x14, 0x00, 0x00, 0x64, 0x00, 0x01, 0x01, 0x04, 0x01, 0x02
-            )
-            template.copyInto(payload)
-            payload[0] = (baseSeq and 0xFF).toByte()
-            payload[1] = ((baseSeq ushr 8) and 0xFF).toByte()
-
-            val header = transportHeader(PKT_HANDSHAKE, payload.size, sessionId, seq)
-            return header + payload
-        }
-
-        /**
-         * 34-byte Window ACK packet (8-byte transport + 26-byte payload).
-         */
-        fun buildAckPacket(sessionId: Int, seq: Int, videoCursor: Int, baseSeq: Int): ByteArray {
-            fun grp(v: Int): ByteArray {
-                val b = ByteArray(8)
-                b[0] = (v and 0xFF).toByte()
-                b[1] = ((v ushr 8) and 0xFF).toByte()
-                b[2] = (v and 0xFF).toByte()
-                b[3] = ((v ushr 8) and 0xFF).toByte()
-                return b
-            }
-            val payload = grp(videoCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
-            val header = transportHeader(PKT_ACK, payload.size, sessionId, seq)
-            return header + payload
-        }
-    }
 }
