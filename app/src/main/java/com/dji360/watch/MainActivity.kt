@@ -63,6 +63,7 @@ class MainActivity : Activity() {
     private lateinit var disconnectBtn: Button
     private lateinit var liveBtn: Button
     private lateinit var surfaceView: SurfaceView
+    private lateinit var rootView: FrameLayout
 
     private lateinit var ble: BleClient
     private lateinit var link: DjiLink
@@ -209,10 +210,12 @@ class MainActivity : Activity() {
             (resources.displayMetrics.density * 233f)
         if (uiScale > 1f) uiScale = 1f   // never upscale beyond the design size
 
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val root = rootView
 
         // ---- BACKGROUND: SurfaceView for Live Viewfinder ----
         surfaceView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(true)
             visibility = View.GONE
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(h: SurfaceHolder) {
@@ -673,10 +676,23 @@ class MainActivity : Activity() {
 
     private fun startLiveStream() {
         surfaceView.visibility = View.VISIBLE
+        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         datalinkClient?.stop()
-        val client = DatalinkClient(uiScope, onVideoFrame = { nal ->
-            decoder?.feedNalUnit(nal)
-        }) { msg ->
+        val net = wifiManager.activeNetwork
+        val ip = wifiManager.getGatewayIp()
+        val client = DatalinkClient(
+            scope = uiScope,
+            network = net,
+            cameraIp = ip,
+            onVideoFrame = { nal ->
+                decoder?.feedNalUnit(nal)
+            },
+            onStats = { pkts ->
+                uiScope.launch {
+                    liveBtn.text = "🔴 $pkts"
+                }
+            }
+        ) { msg ->
             android.util.Log.d("DJIRemote", msg)
         }
         datalinkClient = client
@@ -688,6 +704,7 @@ class MainActivity : Activity() {
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
         surfaceView.visibility = View.GONE
+        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         wifiManager.disconnect()
     }
 

@@ -30,6 +30,26 @@ class CameraWifiManager(
 
     val isConnected: Boolean get() = activeNetwork != null
 
+    fun getGatewayIp(): String {
+        val net = activeNetwork ?: return "192.168.2.1"
+        val lp = cm.getLinkProperties(net) ?: return "192.168.2.1"
+        for (route in lp.routes) {
+            val gateway = route.gateway
+            if (gateway != null && route.isDefaultRoute && !gateway.isAnyLocalAddress) {
+                val ip = gateway.hostAddress
+                if (!ip.isNullOrEmpty()) return ip
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val dhcp = lp.dhcpServerAddress
+            if (dhcp != null && !dhcp.isAnyLocalAddress) {
+                val ip = dhcp.hostAddress
+                if (!ip.isNullOrEmpty()) return ip
+            }
+        }
+        return "192.168.2.1"
+    }
+
     /**
      * Connect to the camera AP with given SSID and WPA passphrase.
      * Suspends until [ConnectivityManager.NetworkCallback.onAvailable] is called and process is bound,

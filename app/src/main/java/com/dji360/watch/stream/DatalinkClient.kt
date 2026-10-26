@@ -1,5 +1,6 @@
 package com.dji360.watch.stream
 
+import android.net.Network
 import com.dji360.watch.dji.DumlFrame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -14,21 +15,12 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.Random
 
-/**
- * DJI Datalink client over UDP (port 9004) for Live Viewfinder video stream.
- *
- * Architecture:
- *   1. Poke TCP port 7001 on the camera to wake its socket listener.
- *   2. Bind local UDP socket to 0.0.0.0:0 (ephemeral port).
- *   3. Send 48-byte Handshake packet (pktType = 0x00) with fresh 8-aligned baseSeq.
- *   4. Receive Handshake ACK from camera.
- *   5. Send LiveView Enable DUML command (0x09/0xA8).
- *   6. Start periodic 1 Hz session registration heartbeat (0x00/0x88) and 30-40 Hz ACK pump (pktType 0x04).
- *   7. Dispatch incoming video packets (pktType = 0x02) to [VideoDepacketizer].
- */
 class DatalinkClient(
     private val scope: CoroutineScope,
+    private val network: Network? = null,
+    private val cameraIp: String = CAMERA_IP,
     private val onVideoFrame: (ByteArray) -> Unit,
+    private val onStats: ((Int) -> Unit)? = null,
     private val log: (String) -> Unit
 ) {
     companion object {
@@ -42,9 +34,7 @@ class DatalinkClient(
         const val PKT_ACKED_DATA: Byte = 0x03
         const val PKT_ACK: Byte = 0x04
         const val PKT_COMMAND: Byte = 0x05
-        /**
-         * 8-byte transport header: [u16le 0x8000 | (8+len)][sessionId][seq][pktType][xor]
-         */
+
         fun transportHeader(pktType: Int, payloadLen: Int, sessionId: Int, seq: Int): ByteArray {
             return transportHeader(pktType.toByte(), payloadLen, sessionId, seq)
         }
@@ -68,9 +58,6 @@ class DatalinkClient(
             return b
         }
 
-        /**
-         * 12-byte routing header for command packet (pktType = 0x05).
-         */
         fun routingHeader(seq: Int, cmdCounter: Int = 1): ByteArray {
             val ack = (seq - 8) and 0xFFFF
             val b = ByteArray(12)
@@ -78,7 +65,6 @@ class DatalinkClient(
             b[1] = ((ack ushr 8) and 0xFF).toByte()
             b[2] = (seq and 0xFF).toByte()
             b[3] = ((seq ushr 8) and 0xFF).toByte()
-            // 4..7 remain 0
             b[8] = (cmdCounter and 0xFF).toByte()
             b[9] = 0x01
             b[10] = 0x00
@@ -86,9 +72,6 @@ class DatalinkClient(
             return b
         }
 
-        /**
-         * Wrap a DUML frame in a complete UDP Datalink command packet.
-         */
         fun wrapCommand(dumlFrame: ByteArray, sessionId: Int, seq: Int): ByteArray {
             val routing = routingHeader(seq)
             val payload = routing + dumlFrame
@@ -96,9 +79,6 @@ class DatalinkClient(
             return header + payload
         }
 
-        /**
-         * 48-byte Handshake packet (8-byte transport + 40-byte payload).
-         */
         fun buildHandshakePacket(sessionId: Int, seq: Int, baseSeq: Int): ByteArray {
             val payload = ByteArray(40)
             val template = byteArrayOf(
@@ -114,9 +94,6 @@ class DatalinkClient(
             return header + payload
         }
 
-        /**
-         * 34-byte Window ACK packet (8-byte transport + 26-byte payload).
-         */
         fun buildAckPacket(sessionId: Int, seq: Int, videoCursor: Int, baseSeq: Int): ByteArray {
             fun grp(v: Int): ByteArray {
                 val b = ByteArray(8)
@@ -133,6 +110,7 @@ class DatalinkClient(
     }
 
     private var socket: DatagramSocket? = null
+    private var tcpSocket: Socket? = null
     private var rxJob: Job? = null
     private var pumpJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -148,43 +126,39 @@ class DatalinkClient(
     private var sessionId: Int = 0x1234
     private val depacketizer = VideoDepacketizer(onVideoFrame)
 
-    /**
-     * Start the datalink live view session.
-     */
     fun start() {
         if (isRunning) return
         isRunning = true
         depacketizer.reset()
 
         scope.launch(Dispatchers.IO) {
-            log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT...")
-            pokeTcpPort()
+            log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT at $cameraIp...")
+            openTcpPoke()
 
             try {
-                val s = DatagramSocket(0) // bind to ephemeral port (0.0.0.0:0)
+                val s = DatagramSocket(null)
+                network?.bindSocket(s)
+                s.bind(InetSocketAddress(0))
                 socket = s
-                log("Datalink: Local UDP socket bound to port ${s.localPort}")
+                log("Datalink: Local UDP socket bound to port ${s.localPort} (bound to network: ${network != null})")
 
-                // Random 8-aligned baseSeq
                 baseSeq = (Random().nextInt(0x7F00) and 0xFFF8) or 0x0008
                 sessionId = Random().nextInt(0xFFFF)
                 cmdSeq = baseSeq + 100
 
-                // Start receiver loop
                 rxJob = launch(Dispatchers.IO) { receiveLoop(s) }
 
-                // Send Handshake packet (48 bytes)
                 val hsPacket = buildHandshakePacket(sessionId, 0, baseSeq)
                 sendUdp(hsPacket)
                 log("Datalink: Sent 48-byte handshake (baseSeq=0x%04X)".format(baseSeq))
 
-                // Short delay before enabling liveview
                 delay(200)
 
-                // Send LiveView Enable command (0x09/0xA8)
-                sendLiveViewEnable()
+                sendLiveEntryPrep()
 
-                // Start periodic ACK pump (~35 Hz) and Heartbeat (1 Hz)
+                sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
+                sendLiveViewEnable(0x41)
+
                 startAckPump()
                 startHeartbeat()
 
@@ -205,27 +179,26 @@ class DatalinkClient(
             socket?.close()
         } catch (_: Exception) {}
         socket = null
+        try {
+            tcpSocket?.close()
+        } catch (_: Exception) {}
+        tcpSocket = null
         depacketizer.reset()
-        log("Datalink: Stopped and socket closed")
+        log("Datalink: Stopped and sockets closed")
     }
 
-    /**
-     * Connect briefly to TCP port 7001 to wake camera listener.
-     */
-    private fun pokeTcpPort() {
+    private fun openTcpPoke() {
         try {
             val s = Socket()
-            s.connect(InetSocketAddress(CAMERA_IP, CAMERA_TCP_POKE_PORT), 1000)
-            s.close()
-            log("Datalink: TCP 7001 poke successful")
+            network?.bindSocket(s)
+            s.connect(InetSocketAddress(cameraIp, CAMERA_TCP_POKE_PORT), 1500)
+            tcpSocket = s
+            log("Datalink: TCP 7001 connected and held open")
         } catch (e: Exception) {
             log("Datalink: TCP 7001 poke ignored/failed: ${e.message}")
         }
     }
 
-    /**
-     * Inbound UDP packet receiver.
-     */
     private fun receiveLoop(s: DatagramSocket) {
         val buf = ByteArray(4096)
         val packet = DatagramPacket(buf, buf.size)
@@ -244,7 +217,8 @@ class DatalinkClient(
                     PKT_VIDEO -> {
                         latestVideoSeq = seq
                         receivedVideoCount++
-                        if (receivedVideoCount % 100 == 1) {
+                        if (receivedVideoCount % 30 == 1) {
+                            onStats?.invoke(receivedVideoCount)
                             log("Datalink: Receiving video packets (count=$receivedVideoCount, seq=$seq)")
                         }
                         depacketizer.feed(buf.copyOf(len))
@@ -252,9 +226,7 @@ class DatalinkClient(
                     PKT_HANDSHAKE -> {
                         log("Datalink: Received Handshake ACK (seq=$seq)")
                     }
-                    PKT_TELEMETRY -> {
-                        // Periodic status / telemetry from camera
-                    }
+                    PKT_TELEMETRY -> {}
                 }
             } catch (e: Exception) {
                 if (!isRunning) break
@@ -263,14 +235,11 @@ class DatalinkClient(
         }
     }
 
-    /**
-     * Sends a raw UDP packet to the camera.
-     */
     private fun sendUdp(data: ByteArray) {
         val s = socket ?: return
         if (s.isClosed) return
         try {
-            val addr = InetAddress.getByName(CAMERA_IP)
+            val addr = InetAddress.getByName(cameraIp)
             val p = DatagramPacket(data, data.size, addr, CAMERA_UDP_PORT)
             s.send(p)
         } catch (e: Exception) {
@@ -278,27 +247,32 @@ class DatalinkClient(
         }
     }
 
-    /**
-     * Send Live View Enable command (DUML 0x09 / 0xA8).
-     */
-    private fun sendLiveViewEnable() {
+    private fun sendLiveEntryPrep() {
         cmdSeq = (cmdSeq + 1) and 0xFFFF
-        // DUML Frame: App(0x02) -> VideoTrans(0x08), CmdSet 0x09, CmdId 0xA8
-        // Payload: [0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        val payload = byteArrayOf(0x08)
+        val dumlFrame = DumlFrame.build(
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.FLAG_REQUEST, 0x02, 0x68,
+            payload
+        )
+        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
+        sendUdp(datagram)
+        log("Datalink: Sent Live Entry Prep (0x02/0x68)")
+    }
+
+    private fun sendLiveViewEnable(rcv: Int) {
+        cmdSeq = (cmdSeq + 1) and 0xFFFF
         val payload = byteArrayOf(0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
         val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_VIDEO_TRANS, cmdSeq,
+            DumlFrame.SENDER_APP, rcv, cmdSeq,
             DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_LIVE_VIEW, DumlFrame.CMD_LIVE_VIEW_ENABLE,
             payload
         )
         val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
         sendUdp(datagram)
-        log("Datalink: Sent Live View Enable (0x09/0xA8, len=${datagram.size})")
+        log("Datalink: Sent Live View Enable (0x09/0xA8 to rcv=0x%02X, len=${datagram.size})".format(rcv))
     }
 
-    /**
-     * ACK Pump running at ~35 Hz to maintain camera transmit window.
-     */
     private fun startAckPump() {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
@@ -307,21 +281,17 @@ class DatalinkClient(
                 ackSeq = (ackSeq + 1) and 0xFFFF
                 val ack = buildAckPacket(sessionId, ackSeq, latestVideoSeq, baseSeq)
                 sendUdp(ack)
-                delay(30) // ~33 Hz
+                delay(30)
             }
         }
     }
 
-    /**
-     * 1 Hz Heartbeat to register session and keep video streaming.
-     */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch(Dispatchers.IO) {
             while (isActive && isRunning) {
                 delay(1000)
                 if (!isRunning) break
-                // 0x00/0x88 APP registration frame
                 cmdSeq = (cmdSeq + 1) and 0xFFFF
                 val regFrame = DumlFrame.build(
                     DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
@@ -333,5 +303,4 @@ class DatalinkClient(
             }
         }
     }
-
 }
