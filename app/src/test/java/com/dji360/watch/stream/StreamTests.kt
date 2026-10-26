@@ -82,8 +82,8 @@ class StreamTests {
         val p2 = ByteArray(20 + nalPart2.size)
         p2[6] = 0x02 // PKT_VIDEO
         p2[16] = 1   // frameNo = 1
-        p2[17] = 0
-        p2[18] = 1   // pos 1
+        p2[17] = 0x80.toByte() // 0x80 >> 7 = 1
+        p2[18] = 0            // pos 1
         nalPart2.copyInto(p2, 20)
 
         // Packet 3: start of frame 2 (triggers completion of frame 1)

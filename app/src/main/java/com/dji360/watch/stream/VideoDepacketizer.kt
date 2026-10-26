@@ -21,7 +21,8 @@ class VideoDepacketizer(
     private var buffer = ByteArrayOutputStream(64 * 1024)
     private var currentFrameNo: Int = -1
     private var lastFragmentPos: Int = -1
-    private var isCorrupt = false
+    var droppedFragments = 0
+        private set
 
     var droppedFrames: Int = 0
         private set
@@ -45,11 +46,11 @@ class VideoDepacketizer(
             finishCurrentFrame()
             currentFrameNo = frameNo
             lastFragmentPos = -1
-            isCorrupt = false
+            
         }
 
         if (lastFragmentPos != -1 && pos != lastFragmentPos + 1 && pos != lastFragmentPos) {
-            isCorrupt = true // fragment dropped or reordered
+            droppedFragments++
         }
         lastFragmentPos = pos
 
@@ -61,10 +62,7 @@ class VideoDepacketizer(
         val raw = buffer.toByteArray()
         buffer.reset()
 
-        if (isCorrupt) {
-            droppedFrames++
-            return
-        }
+
 
         val stripped = stripDjiMarker(raw)
         if (stripped.isNotEmpty()) {
@@ -76,7 +74,7 @@ class VideoDepacketizer(
         buffer.reset()
         currentFrameNo = -1
         lastFragmentPos = -1
-        isCorrupt = false
+        
     }
 
     companion object {
