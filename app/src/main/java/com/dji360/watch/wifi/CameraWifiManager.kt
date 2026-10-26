@@ -42,8 +42,8 @@ class CameraWifiManager(
     ): Boolean {
         // Try WPA2 first; if rejected/unavailable and Q+, fallback to WPA3-SAE
         var ok = attemptConnect(ssid, password, isWpa3 = false, timeoutMs = timeoutMs / 2)
-        if (!ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && password.isNotEmpty()) {
-            log("WiFi: WPA2 attempt not completed, trying WPA3-SAE...")
+        if (!ok && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && password.isNotEmpty()) {
+            log("WiFi: WPA2 attempt not completed, trying WPA3...")
             ok = attemptConnect(ssid, password, isWpa3 = true, timeoutMs = timeoutMs / 2)
         }
         return ok
@@ -56,7 +56,7 @@ class CameraWifiManager(
         timeoutMs: Long
     ): Boolean {
         disconnect()
-        val sec = if (isWpa3) "WPA3-SAE" else "WPA2"
+        val sec = if (isWpa3) "WPA3" else "WPA2"
         log("WiFi: Connecting to camera AP SSID="" + ssid + "" (" + sec + ", timeout " + (timeoutMs / 1000) + "s)...")
 
         val deferred = CompletableDeferred<Boolean>()
@@ -88,8 +88,8 @@ class CameraWifiManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val specifierBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
             if (password.isNotEmpty()) {
-                if (isWpa3) {
-                    specifierBuilder.setWpa3SaePassphrase(password)
+                if (isWpa3 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    specifierBuilder.setWpa3Passphrase(password)
                 } else {
                     specifierBuilder.setWpa2Passphrase(password)
                 }
