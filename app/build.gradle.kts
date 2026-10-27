@@ -51,7 +51,7 @@ android {
 
     signingConfigs {
         create("sideload") {
-            storeFile = file("sideload.jks")
+            storeFile = rootProject.file("app/sideload.jks")
             storePassword = "android"
             keyAlias = "dji-remote"
             keyPassword = "android"
@@ -61,7 +61,6 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("sideload")
         }
         release {
             // Stable permanent key so sideloaded updates install cleanly over previous builds
