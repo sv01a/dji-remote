@@ -36,37 +36,35 @@ class CameraWifiManager(
         get() = isCameraWifiConnected
 
     fun findCameraWifiNetwork(): Network? {
-        val active = activeNetwork
-        if (active != null) {
-            val caps = cm.getNetworkCapabilities(active)
-            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
-                return active
-            }
-        }
+        val wifiNets = mutableListOf<Network>()
         for (net in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(net) ?: continue
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                val lp = cm.getLinkProperties(net) ?: continue
-                val hasCameraIp = lp.linkAddresses.any {
-                    val h = it.address?.hostAddress ?: ""
-                    h.startsWith("192.168.2.")
-                }
-                val hasCameraRoute = lp.routes.any {
-                    it.gateway?.hostAddress == "192.168.2.1"
-                }
-                if (hasCameraIp || hasCameraRoute) {
-                    activeNetwork = net
-                    try {
-                        cm.bindProcessToNetwork(net)
-                        log("WiFi: Found and bound to camera Wi-Fi network: $net")
-                    } catch (e: Exception) {
-                        log("WiFi: bindProcessToNetwork error: ${e.message}")
-                    }
-                    return net
-                }
+                wifiNets.add(net)
             }
         }
-        return null
+        if (wifiNets.isEmpty()) {
+            activeNetwork = null
+            return null
+        }
+
+        // Prefer camera network (no internet validation or 192.168.2.x)
+        val chosen = wifiNets.firstOrNull { net ->
+            val lp = cm.getLinkProperties(net)
+            val hasCameraSubnet = lp?.linkAddresses?.any { it.address.hostAddress?.startsWith("192.168.2.") == true } == true
+            val hasCameraRoute = lp?.routes?.any { it.gateway?.hostAddress == "192.168.2.1" } == true
+            val noInternet = cm.getNetworkCapabilities(net)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == false
+            hasCameraSubnet || hasCameraRoute || noInternet
+        } ?: wifiNets.first()
+
+        activeNetwork = chosen
+        try {
+            val bound = cm.bindProcessToNetwork(chosen)
+            log("WiFi: Process bound to Wi-Fi network $chosen (result=$bound)")
+        } catch (e: Exception) {
+            log("WiFi: bindProcessToNetwork error: ${e.message}")
+        }
+        return chosen
     }
 
     fun findWifiNetwork(): Network? {
