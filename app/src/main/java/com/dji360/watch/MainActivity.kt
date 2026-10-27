@@ -808,7 +808,7 @@ class MainActivity : Activity() {
                 }
                 startActivity(intent)
             } catch (e: Exception) {
-                log("Failed to request Bluetooth enable: ${e.message}")
+                android.util.Log.w("DJIRemote", "Failed to request Bluetooth enable: ${e.message}")
             }
             render(Ui.FAILED, DjiLink.CameraState())
             return
