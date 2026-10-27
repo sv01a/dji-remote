@@ -691,7 +691,7 @@ class MainActivity : Activity() {
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         liveBtn.text = "⏳ STREAM..."
         datalinkClient?.stop()
-        val net = wifiManager.activeNetwork
+        val net = wifiManager.findWifiNetwork()
         val ip = wifiManager.getGatewayIp()
         var lastPkt = 0
         val client = DatalinkClient(
@@ -715,10 +715,18 @@ class MainActivity : Activity() {
             }
         ) { msg ->
             android.util.Log.d("DJIRemote", msg)
-            if (msg.contains("Handshake") || msg.contains("exception") || msg.contains("error")) {
+            if (msg.contains("handshake", ignoreCase = true) ||
+                msg.contains("ack", ignoreCase = true) ||
+                msg.contains("udp", ignoreCase = true) ||
+                msg.contains("tcp", ignoreCase = true) ||
+                msg.contains("video", ignoreCase = true) ||
+                msg.contains("error", ignoreCase = true) ||
+                msg.contains("fail", ignoreCase = true) ||
+                msg.contains("bound", ignoreCase = true)) {
                 uiScope.launch {
-                    streamHudStatus = msg.takeLast(40)
-                    coordText.text = streamHudStatus
+                    val shortMsg = msg.replace("Datalink: ", "").take(45)
+                    streamHudStatus = shortMsg
+                    coordText.text = shortMsg
                     coordText.visibility = View.VISIBLE
                 }
             }
