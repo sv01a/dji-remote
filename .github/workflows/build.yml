@@ -39,8 +39,12 @@ jobs:
 
       - name: Build Release APK
         run: |
-          ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || (cat /tmp/build.log && exit 1)
-          cat /tmp/build.log | grep -E "BUILD SUCCESSFUL" || true
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || {
+            tail -n 50 /tmp/build.log | while IFS= read -r line; do
+              echo "::error title=GradleError::$line"
+            done
+            exit 1
+          }
           find app/build/outputs -name "*.apk" || true
 
       - name: Upload Release APK artifact
