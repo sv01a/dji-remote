@@ -382,6 +382,19 @@ class DjiLink(
         return null
     }
 
+    suspend fun sendLiveViewEnableBle(): Boolean {
+        log("DJI: Sending Live View Enable over BLE (0x09/0xA8)...")
+        val payload = byteArrayOf(0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+        val s1 = nextSeq()
+        val frame1 = DumlFrame.build(DumlFrame.SENDER_APP, 0x41, s1, DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_LIVE_VIEW, DumlFrame.CMD_LIVE_VIEW_ENABLE, payload)
+        ble.write(frame1, withResponse = false)
+        kotlinx.coroutines.delay(50)
+        val s2 = nextSeq()
+        val frame2 = DumlFrame.build(DumlFrame.SENDER_APP, DumlFrame.RX_VIDEO_TRANS, s2, DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_LIVE_VIEW, DumlFrame.CMD_LIVE_VIEW_ENABLE, payload)
+        ble.write(frame2, withResponse = false)
+        return true
+    }
+
     suspend fun queryWifiCredentials(timeoutMs: Long = 8000): Pair<String, String>? {
         log("DJI: Querying camera Wi-Fi SSID over BLE...")
         val ssid = queryWifiSsid(timeoutMs / 2)

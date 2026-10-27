@@ -132,19 +132,25 @@ class DatalinkClient(
         depacketizer.reset()
 
         scope.launch(Dispatchers.IO) {
-            log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT at $cameraIp...")
-            openTcpPoke()
+            launch(Dispatchers.IO) {
+                log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT at $cameraIp...")
+                openTcpPoke()
+            }
 
             try {
                 val s = DatagramSocket(0)
                 try {
                     network?.bindSocket(s)
-                    log("Datalink: Bound DatagramSocket to network successfully")
+                    log("Datalink: Bound DatagramSocket to network")
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
-                // Do not s.connect() so socket can receive packets from ephemeral sender ports on the camera
-                log("Datalink: Ready for UDP datagrams to/from $cameraIp:$CAMERA_UDP_PORT")
+                try {
+                    s.connect(InetAddress.getByName(cameraIp), CAMERA_UDP_PORT)
+                    log("Datalink: Connected UDP socket to $cameraIp:$CAMERA_UDP_PORT")
+                } catch (e: Exception) {
+                    log("Datalink: UDP connect error: ${e.message}")
+                }
                 socket = s
                 log("Datalink: Local UDP socket bound to port ${s.localPort}")
 
@@ -172,6 +178,7 @@ class DatalinkClient(
                 sendLiveEntryPrep()
                 sendLiveViewEnable(0x41)
                 sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
+                sendLiveViewEnable(DumlFrame.RX_CAMERA)
 
                 startAckPump()
                 startHeartbeat()
@@ -243,11 +250,12 @@ class DatalinkClient(
                 val pktType = buf[6]
                 val seq = (buf[4].toInt() and 0xFF) or ((buf[5].toInt() and 0xFF) shl 8)
 
+                log("Datalink: RX pkt=0x%02X seq=%d len=%d".format(pktType, seq, len))
                 when (pktType) {
                     PKT_VIDEO -> {
                         latestVideoSeq = seq
                         receivedVideoCount++
-                        if (receivedVideoCount % 10 == 1) {
+                        if (receivedVideoCount % 5 == 1) {
                             onStats?.invoke(receivedVideoCount)
                         }
                         depacketizer.feed(buf.copyOf(len))
