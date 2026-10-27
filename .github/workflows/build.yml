@@ -39,8 +39,11 @@ jobs:
 
       - name: Build Release APK
         run: |
-          set -o pipefail
-          ./gradlew :app:assembleRelease --stacktrace --no-daemon
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon 2>&1 | tee /tmp/build.log || {
+            echo "::error::BUILD FAILED - LOG TAIL:"
+            tail -n 80 /tmp/build.log
+            exit 1
+          }
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4
