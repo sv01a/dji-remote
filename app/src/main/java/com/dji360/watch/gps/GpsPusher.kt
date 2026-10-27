@@ -164,11 +164,11 @@ class GpsPusher(
 
     fun stop() {
         listener?.let { l ->
-            try { lm?.removeUpdates(l) } catch (_: Exception) {}
+            try { lm?.removeUpdates(l) } catch (e: Exception) {}
         }
         listener = null
         gnssCallback?.let { cb ->
-            try { lm?.unregisterGnssStatusCallback(cb) } catch (_: Exception) {}
+            try { lm?.unregisterGnssStatusCallback(cb) } catch (e: Exception) {}
         }
         gnssCallback = null
         gnssReported = false

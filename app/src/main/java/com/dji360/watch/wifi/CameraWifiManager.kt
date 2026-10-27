@@ -174,7 +174,7 @@ class CameraWifiManager(
         activeNetwork = null
         try {
             cm.bindProcessToNetwork(null)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         log("WiFi: Disconnected and process network unbound")
     }
 }

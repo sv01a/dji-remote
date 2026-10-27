@@ -51,7 +51,7 @@ android {
 
     signingConfigs {
         create("sideload") {
-            storeFile = rootProject.file("app/sideload.jks")
+            storeFile = file("sideload.jks")
             storePassword = "android"
             keyAlias = "dji-remote"
             keyPassword = "android"

@@ -207,11 +207,11 @@ class DatalinkClient(
         heartbeatJob?.cancel(); heartbeatJob = null
         try {
             socket?.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         socket = null
         try {
             tcpSocket?.close()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         tcpSocket = null
         depacketizer.reset()
         log("Datalink: Stopped and sockets closed")

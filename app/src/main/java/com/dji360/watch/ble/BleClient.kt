@@ -85,7 +85,7 @@ class BleClient(private val context: Context) {
                 it.disconnect()
                 it.close()
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         gatt = null
         writeChar = null
         setupDone?.complete(false)

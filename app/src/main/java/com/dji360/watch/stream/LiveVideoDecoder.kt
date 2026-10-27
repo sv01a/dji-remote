@@ -120,7 +120,7 @@ class LiveVideoDecoder(
         try {
             codec?.stop()
             codec?.release()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         codec = null
         log("Decoder: Stopped and released")
     }

@@ -174,11 +174,11 @@ object Diagnostics {
             val addr = r.device.address
             val row = rows.getOrPut(addr) {
                 try { DevRow(r.scanRecord?.deviceName ?: r.device.name, r.rssi) }
-                catch (_: SecurityException) { DevRow(null, r.rssi) }
+                catch (e: SecurityException) { DevRow(null, r.rssi) }
             }
             if (r.rssi > row.rssi) row.rssi = r.rssi
             if (row.name == null) {
-                try { row.name = r.scanRecord?.deviceName ?: r.device.name } catch (_: SecurityException) {}
+                try { row.name = r.scanRecord?.deviceName ?: r.device.name } catch (e: SecurityException) {}
             }
             val specific = r.scanRecord?.manufacturerSpecificData
             if (specific != null && specific.size() > 0) {
@@ -199,7 +199,7 @@ object Diagnostics {
             try {
                 (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
                     .adapter?.bluetoothLeScanner?.stopScan(callback)
-            } catch (_: Exception) {}
+            } catch (e: Exception) {}
             val out = mutableListOf(if (cancelled) "SCAN CANCELLED" else "SCAN DONE")
             out += "devices seen: ${rows.size}"
             rows.entries.sortedByDescending { it.value.rssi }.take(12).forEach { (addr, row) ->
