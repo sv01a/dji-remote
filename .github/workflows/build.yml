@@ -39,11 +39,9 @@ jobs:
 
       - name: Build Release APK
         run: |
-          ./gradlew :app:assembleRelease --stacktrace --no-daemon 2>&1 | tee /tmp/build.log || {
-            echo "::error::BUILD FAILED - LOG TAIL:"
-            tail -n 80 /tmp/build.log
-            exit 1
-          }
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || (cat /tmp/build.log && exit 1)
+          cat /tmp/build.log | grep -E "BUILD SUCCESSFUL" || true
+          find app/build/outputs -name "*.apk" || true
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4
