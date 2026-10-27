@@ -38,7 +38,13 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Build Release APK
-        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
+        run: |
+          ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || {
+            tail -n 60 /tmp/build.log | while IFS= read -r line; do
+              echo "::error title=GradleError::$line"
+            done
+            exit 1
+          }
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4

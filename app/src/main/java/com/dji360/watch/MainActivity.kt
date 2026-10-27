@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private lateinit var gps: GpsPusher
     private var gpsRunning = false
     private var satCount = 0
+    @Volatile private var streamHudStatus: String = ""
     private var lastLat = 0.0
     private var lastLng = 0.0
     private var gpsFix = false
