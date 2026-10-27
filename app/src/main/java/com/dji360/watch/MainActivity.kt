@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -802,10 +803,6 @@ class MainActivity : Activity() {
             coordText.visibility = View.VISIBLE
             Diagnostics.doubleBuzz(applicationContext)
             try {
-                @Suppress("DEPRECATION")
-                if (Build.VERSION.SDK_INT < 33) {
-                    ad.enable()
-                }
                 val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
