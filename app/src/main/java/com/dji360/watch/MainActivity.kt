@@ -44,10 +44,10 @@ import java.util.Locale
  *
  *   ○ DISCONNECTED   [ CONNECT ]
  *   ◌ CONNECTING…
- *   ● READY           🎥 360 Video    ( REC )   QS    ✕(угол)
+ *   ● READY           🎥 360 Video    ( REC )   QS    ✕(corner)
  *   ● RECORDING       01:27     ( STOP )
  *
- * Режим — пиктограммой + именем. Дисконнект — маленькая ✕ в правом нижнем углу.
+ * Mode: icon + name. Disconnect: small ✕ in bottom right corner.
  */
 class MainActivity : Activity() {
 
@@ -426,7 +426,7 @@ class MainActivity : Activity() {
 
     /**
      * GPS icon: visible while GPS is running; blinks while the receiver is still
-     * searching for a fix ("на поиске спутников").
+     * searching for a fix.
      */
     private fun updateGpsIcon() {
         val searching = gpsRunning && !gpsFix
@@ -568,7 +568,7 @@ class MainActivity : Activity() {
         }
 
         if (wifiManager.isConnected) {
-            liveBtn.text = "⏳ Стрим..."
+            liveBtn.text = "⏳ STREAM..."
             startLiveStream()
             return
         }
@@ -601,13 +601,13 @@ class MainActivity : Activity() {
     }
 
     private fun connectWifiAndStartStream(ssid: String, pass: String) {
-        liveBtn.text = "🔗 Wi-Fi..."
+        liveBtn.text = "🔗 WI-FI..."
         wifiJob?.cancel()
         wifiJob = uiScope.launch {
             val ok = wifiManager.connectToCameraAp(ssid, pass)
             if (ok) {
                 Diagnostics.shortBuzz(applicationContext)
-                liveBtn.text = "⏳ Стрим..."
+                liveBtn.text = "⏳ STREAM..."
                 startLiveStream()
             } else {
                 Diagnostics.doubleBuzz(applicationContext)
@@ -632,7 +632,7 @@ class MainActivity : Activity() {
         }
 
         val ssidLabel = TextView(this).apply {
-            text = "SSID (Wi-Fi камеры):"
+            text = "Camera Wi-Fi SSID:"
             textSize = 13f
             setTextColor(Color.LTGRAY)
         }
@@ -643,14 +643,14 @@ class MainActivity : Activity() {
         }
 
         val passLabel = TextView(this).apply {
-            text = "Пароль (с экрана камеры):"
+            text = "Password (from camera screen):"
             textSize = 13f
             setTextColor(Color.LTGRAY)
             setPadding(0, dp(8), 0, 0)
         }
         val passInput = EditText(this).apply {
             setText(currentPass)
-            hint = "Пароль из меню камеры"
+            hint = "Password from camera menu"
             setHintTextColor(Color.DKGRAY)
             setTextColor(Color.WHITE)
             setSingleLine()
@@ -662,10 +662,10 @@ class MainActivity : Activity() {
         layout.addView(passInput)
 
         AlertDialog.Builder(this)
-            .setTitle("Wi-Fi камеры")
-            .setMessage("На камере: Настройки → Беспроводное подключение")
+            .setTitle("Camera Wi-Fi")
+            .setMessage("On camera: Settings → Wireless Connection")
             .setView(layout)
-            .setPositiveButton("Подключить") { _, _ ->
+            .setPositiveButton("Connect") { _, _ ->
                 val s = ssidInput.text.toString().trim()
                 val p = passInput.text.toString().trim()
                 if (s.isNotEmpty()) {
@@ -676,14 +676,14 @@ class MainActivity : Activity() {
                     connectWifiAndStartStream(s, p)
                 }
             }
-            .setNegativeButton("Отмена", null)
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
     private fun startLiveStream() {
         surfaceView.visibility = View.VISIBLE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
-        liveBtn.text = "⏳ Стрим..."
+        liveBtn.text = "⏳ STREAM..."
         datalinkClient?.stop()
         val net = wifiManager.activeNetwork
         val ip = wifiManager.getGatewayIp()

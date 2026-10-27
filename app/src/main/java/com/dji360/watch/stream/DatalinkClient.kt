@@ -143,6 +143,12 @@ class DatalinkClient(
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
+                try {
+                    s.connect(InetAddress.getByName(cameraIp), CAMERA_UDP_PORT)
+                    log("Datalink: Connected UDP socket to $cameraIp:$CAMERA_UDP_PORT")
+                } catch (e: Exception) {
+                    log("Datalink: UDP connect warning: ${e.message}")
+                }
                 socket = s
                 log("Datalink: Local UDP socket bound to port ${s.localPort}")
 
@@ -152,16 +158,24 @@ class DatalinkClient(
 
                 rxJob = launch(Dispatchers.IO) { receiveLoop(s) }
 
-                val hsPacket = buildHandshakePacket(sessionId, 0, baseSeq)
-                sendUdp(hsPacket)
-                log("Datalink: Sent 48-byte handshake (baseSeq=0x%04X)".format(baseSeq))
+                // Burst handshake packets until camera replies or up to 8 attempts
+                launch(Dispatchers.IO) {
+                    var hsAttempt = 0
+                    while (isActive && isRunning && latestVideoSeq == 0 && hsAttempt < 8) {
+                        val hsPacket = buildHandshakePacket(sessionId, hsAttempt, baseSeq)
+                        sendUdp(hsPacket)
+                        log("Datalink: Sent handshake #$hsAttempt (baseSeq=0x%04X)".format(baseSeq))
+                        hsAttempt++
+                        delay(250)
+                    }
+                }
 
-                delay(200)
-
+                delay(150)
+                sendSessionWake()
                 sendLiveGate()
                 sendLiveEntryPrep()
-                sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
                 sendLiveViewEnable(0x41)
+                sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
 
                 startAckPump()
                 startHeartbeat()
@@ -171,6 +185,7 @@ class DatalinkClient(
                     delay(2000)
                     if (isRunning && latestVideoSeq == 0) {
                         log("Datalink: No video packets after 2s, resending LiveView enable burst...")
+                        sendSessionWake()
                         sendLiveGate()
                         sendLiveViewEnable(0x41)
                         sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
@@ -258,12 +273,28 @@ class DatalinkClient(
         val s = socket ?: return
         if (s.isClosed) return
         try {
-            val addr = InetAddress.getByName(cameraIp)
-            val p = DatagramPacket(data, data.size, addr, CAMERA_UDP_PORT)
+            val p = if (s.isConnected) {
+                DatagramPacket(data, data.size)
+            } else {
+                val addr = InetAddress.getByName(cameraIp)
+                DatagramPacket(data, data.size, addr, CAMERA_UDP_PORT)
+            }
             s.send(p)
         } catch (e: Exception) {
             log("Datalink: UDP send error: ${e.message}")
         }
+    }
+
+    private fun sendSessionWake() {
+        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        val dumlFrame = DumlFrame.build(
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x2B,
+            byteArrayOf(0x01)
+        )
+        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
+        sendUdp(datagram)
+        log("Datalink: Sent Session Wake (0x00/0x2B)")
     }
 
     private fun sendLiveGate() {

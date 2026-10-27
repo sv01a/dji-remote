@@ -35,7 +35,7 @@ class CameraWifiManager(
         val lp = cm.getLinkProperties(net) ?: return "192.168.2.1"
         for (route in lp.routes) {
             val gateway = route.gateway
-            if (gateway != null && route.isDefaultRoute && !gateway.isAnyLocalAddress) {
+            if (gateway != null && !gateway.isAnyLocalAddress) {
                 val ip = gateway.hostAddress
                 if (!ip.isNullOrEmpty()) return ip
             }
@@ -45,6 +45,16 @@ class CameraWifiManager(
             if (dhcp != null && !dhcp.isAnyLocalAddress) {
                 val ip = dhcp.hostAddress
                 if (!ip.isNullOrEmpty()) return ip
+            }
+        }
+        // Extract camera gateway from own assigned IP (e.g. 192.168.2.X -> 192.168.2.1)
+        for (addr in lp.linkAddresses) {
+            val host = addr.address?.hostAddress ?: continue
+            val parts = host.split(".")
+            if (parts.size == 4 && parts[0] == "192" && parts[1] == "168") {
+                val derived = "${parts[0]}.${parts[1]}.${parts[2]}.1"
+                log("WiFi: Derived camera gateway from assigned IP: $derived")
+                return derived
             }
         }
         return "192.168.2.1"
