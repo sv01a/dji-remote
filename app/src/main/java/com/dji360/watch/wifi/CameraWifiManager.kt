@@ -95,11 +95,13 @@ class CameraWifiManager(
         password: String,
         timeoutMs: Long = 25_000
     ): Boolean {
-        // If already connected, reuse existing network directly without disconnecting
-        if (activeNetwork != null) {
-            log("WiFi: Already connected to camera network: $activeNetwork")
+        // Check if actually connected to a valid Wi-Fi network right now
+        val current = findWifiNetwork()
+        if (current != null) {
+            log("WiFi: Already connected to camera network: $current")
             return true
         }
+        activeNetwork = null
 
         // Try WPA2 first with full 20s timeout
         var ok = attemptConnect(ssid, password, isWpa3 = false, timeoutMs = 20_000)

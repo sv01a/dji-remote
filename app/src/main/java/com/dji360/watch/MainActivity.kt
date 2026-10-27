@@ -309,7 +309,7 @@ class MainActivity : Activity() {
         }
         logScroll.addView(logTextView)
         root.addView(logScroll, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(130)
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(180)
         ).apply { gravity = Gravity.BOTTOM; bottomMargin = dp(46); leftMargin = dp(10); rightMargin = dp(10) })
 
         // ---- LOG toggle button (bottom right) ----
@@ -676,9 +676,15 @@ class MainActivity : Activity() {
 
     private fun connectWifiAndStartStream(ssid: String, pass: String) {
         liveBtn.text = "🔗 WI-FI..."
+        appendLog("WiFi: Connecting to SSID='$ssid'...")
         wifiJob?.cancel()
         wifiJob = uiScope.launch {
             val ok = wifiManager.connectToCameraAp(ssid, pass)
+            if (ok) {
+                appendLog("WiFi: Connected! Network ready.")
+            } else {
+                appendLog("WiFi: Failed to connect to $ssid")
+            }
             if (ok) {
                 Diagnostics.shortBuzz(applicationContext)
                 liveBtn.text = "⏳ STREAM..."
@@ -761,6 +767,14 @@ class MainActivity : Activity() {
         if (::logScroll.isInitialized) logScroll.visibility = View.VISIBLE
         datalinkClient?.stop()
         val net = wifiManager.findWifiNetwork()
+        if (net == null) {
+            appendLog("WiFi: No active Wi-Fi! Connect phone to camera Wi-Fi AP")
+            coordText.text = "No Wi-Fi! Connect to camera"
+            coordText.visibility = View.VISIBLE
+            liveBtn.text = "❌ NO WIFI"
+            Diagnostics.doubleBuzz(applicationContext)
+            return
+        }
         val ip = wifiManager.getGatewayIp()
         var lastPkt = 0
         val client = DatalinkClient(
@@ -996,10 +1010,13 @@ class MainActivity : Activity() {
     /* ----------------------------- misc ----------------------------- */
 
     private fun appendLog(msg: String) {
+        if (msg.contains("DJI RX:") || msg.contains("DJI status:") || msg.contains("DUML RX:")) {
+            return
+        }
         val clean = msg.replace("Datalink: ", "")
         val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
         logHistory.add("[$time] $clean")
-        while (logHistory.size > 30) logHistory.poll()
+        while (logHistory.size > 60) logHistory.poll()
         val text = logHistory.joinToString("\n")
         uiScope.launch {
             if (::logTextView.isInitialized) {
