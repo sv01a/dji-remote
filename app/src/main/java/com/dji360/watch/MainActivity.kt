@@ -733,9 +733,7 @@ class MainActivity : Activity() {
         }
         datalinkClient = client
         client.start()
-        uiScope.launch {
-            link.sendLiveViewEnableBle()
-        }
+
     }
 
     private fun stopLivePreview() {
