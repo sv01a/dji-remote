@@ -17,21 +17,21 @@ class LiveVideoDecoder(
     private var codec: MediaCodec? = null
     @Volatile private var isRunning = false
     private var isConfigured = false
-    private var detectedMime: String = "video/avc"
-    private var frameCount = 0L
+    var detectedMime: String = "init"
+        private set
+    var frameCount = 0L
+        private set
+    val renderedFrames: Long get() = frameCount
+    val codecMime: String get() = detectedMime
+    private var cachedHeader: ByteArray? = null
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
 
         if (!isConfigured) {
-            val mime = detectMime(nal)
-            if (mime != null) {
-                detectedMime = mime
-                initCodec(mime)
-            } else {
-                // If not identified yet, try initializing AVC as fallback
-                initCodec("video/avc")
-            }
+            val mime = detectMime(nal) ?: "video/hevc"
+            detectedMime = mime
+            initCodec(mime)
         }
 
         val c = codec ?: return
@@ -97,10 +97,12 @@ class LiveVideoDecoder(
         while (i + 4 <= nal.size) {
             if (nal[i] == 0.toByte() && nal[i + 1] == 0.toByte() && nal[i + 2] == 1.toByte()) {
                 val b = nal[i + 3].toInt() and 0xFF
-                // H.264 SPS: nal_type 7
-                if ((b and 0x1F) == 7) return "video/avc"
-                // HEVC VPS: nal_type 32
-                if (((b ushr 1) and 0x3F) == 32) return "video/hevc"
+                val hevcType = (b ushr 1) and 0x3F
+                val avcType = b and 0x1F
+                // HEVC: VPS (32), SPS (33), PPS (34)
+                if (hevcType in 32..34) return "video/hevc"
+                // H.264: SPS (7), PPS (8)
+                if (avcType in 7..8) return "video/avc"
                 i += 3
             } else {
                 i++

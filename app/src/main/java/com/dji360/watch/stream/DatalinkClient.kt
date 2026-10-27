@@ -143,12 +143,8 @@ class DatalinkClient(
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
-                try {
-                    s.connect(InetAddress.getByName(cameraIp), CAMERA_UDP_PORT)
-                    log("Datalink: Connected UDP socket to $cameraIp:$CAMERA_UDP_PORT")
-                } catch (e: Exception) {
-                    log("Datalink: UDP connect warning: ${e.message}")
-                }
+                // Do not s.connect() so socket can receive packets from ephemeral sender ports on the camera
+                log("Datalink: Ready for UDP datagrams to/from $cameraIp:$CAMERA_UDP_PORT")
                 socket = s
                 log("Datalink: Local UDP socket bound to port ${s.localPort}")
 
@@ -251,14 +247,14 @@ class DatalinkClient(
                     PKT_VIDEO -> {
                         latestVideoSeq = seq
                         receivedVideoCount++
-                        if (receivedVideoCount % 30 == 1) {
+                        if (receivedVideoCount % 10 == 1) {
                             onStats?.invoke(receivedVideoCount)
-                            log("Datalink: Receiving video packets (count=$receivedVideoCount, seq=$seq)")
                         }
                         depacketizer.feed(buf.copyOf(len))
                     }
                     PKT_HANDSHAKE -> {
                         log("Datalink: Received Handshake ACK (seq=$seq)")
+                        onStats?.invoke(receivedVideoCount)
                     }
                     PKT_TELEMETRY -> {}
                 }

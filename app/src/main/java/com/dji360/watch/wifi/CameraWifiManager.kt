@@ -28,7 +28,21 @@ class CameraWifiManager(
     var activeNetwork: Network? = null
         private set
 
-    val isConnected: Boolean get() = activeNetwork != null
+    val isConnected: Boolean
+        get() {
+            if (activeNetwork != null) return true
+            val current = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(current) ?: return false
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                activeNetwork = current
+                try {
+                    cm.bindProcessToNetwork(current)
+                    log("WiFi: Adopted active system Wi-Fi network: $current")
+                } catch (e: Exception) {}
+                return true
+            }
+            return false
+        }
 
     fun getGatewayIp(): String {
         val net = activeNetwork ?: return "192.168.2.1"

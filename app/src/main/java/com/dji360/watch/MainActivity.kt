@@ -215,8 +215,8 @@ class MainActivity : Activity() {
 
         // ---- BACKGROUND: SurfaceView for Live Viewfinder ----
         surfaceView = SurfaceView(this).apply {
-            setZOrderMediaOverlay(true)
-            visibility = View.GONE
+            setZOrderMediaOverlay(false)
+            visibility = View.VISIBLE
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(h: SurfaceHolder) {
                     val dec = LiveVideoDecoder(h.surface) { msg ->
@@ -346,11 +346,14 @@ class MainActivity : Activity() {
 
         updateGpsIcon()
 
-        // Debug-only: show live coordinates; never rendered in release builds.
-        if (BuildConfig.DEBUG) {
-            val hasFix = lastLat != 0.0 || lastLng != 0.0
-            coordText.text = if (hasFix)
-                String.format(Locale.US, "%.5f %.5f", lastLat, lastLng) else "—"
+        // Live HUD: Show IP, connection and stream diagnostics
+        val hud = streamHudStatus.ifEmpty {
+            if (wifiManager.isConnected) "WiFi: ${wifiManager.getGatewayIp()} (Ready)"
+            else if (lastLat != 0.0 || lastLng != 0.0) String.format(Locale.US, "%.5f %.5f", lastLat, lastLng)
+            else ""
+        }
+        if (hud.isNotEmpty()) {
+            coordText.text = hud
             coordText.visibility = View.VISIBLE
         } else {
             coordText.visibility = View.GONE
@@ -407,7 +410,9 @@ class MainActivity : Activity() {
         // LIVE / Viewfinder button (visible when ready and not recording)
         if (ui == Ui.READY) {
             liveBtn.visibility = View.VISIBLE
-            if (wifiJob?.isActive != true) {
+            if (datalinkClient?.isRunning == true) {
+                // Keep streaming indicators (do not clobber)
+            } else if (wifiJob?.isActive != true) {
                 liveBtn.text = if (wifiManager.isConnected) "🟢 AP" else "👁 LIVE"
             }
         } else {
@@ -687,6 +692,7 @@ class MainActivity : Activity() {
         datalinkClient?.stop()
         val net = wifiManager.activeNetwork
         val ip = wifiManager.getGatewayIp()
+        var lastPkt = 0
         val client = DatalinkClient(
             scope = uiScope,
             network = net,
@@ -695,12 +701,26 @@ class MainActivity : Activity() {
                 decoder?.feedNalUnit(nal)
             },
             onStats = { pkts ->
+                lastPkt = pkts
+                val decFrames = decoder?.renderedFrames ?: 0L
+                val mime = decoder?.codecMime ?: "init"
+                val status = "IP: $ip | UDP: $pkts | DEC: $decFrames ($mime)"
+                streamHudStatus = status
                 uiScope.launch {
                     liveBtn.text = "🔴 $pkts"
+                    coordText.text = status
+                    coordText.visibility = View.VISIBLE
                 }
             }
         ) { msg ->
             android.util.Log.d("DJIRemote", msg)
+            if (msg.contains("Handshake") || msg.contains("exception") || msg.contains("error")) {
+                uiScope.launch {
+                    streamHudStatus = msg.takeLast(40)
+                    coordText.text = streamHudStatus
+                    coordText.visibility = View.VISIBLE
+                }
+            }
         }
         datalinkClient = client
         client.start()
