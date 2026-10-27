@@ -25,6 +25,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.ScrollView
 import android.widget.EditText
 import android.app.AlertDialog
 import com.dji360.watch.ble.BleClient
@@ -67,6 +68,10 @@ class MainActivity : Activity() {
     private lateinit var liveBtn: Button
     private lateinit var surfaceView: SurfaceView
     private lateinit var rootView: FrameLayout
+    private lateinit var logScroll: ScrollView
+    private lateinit var logTextView: TextView
+    private lateinit var logToggleBtn: Button
+    private val logHistory = java.util.concurrent.ConcurrentLinkedQueue<String>()
 
     private lateinit var ble: BleClient
     private lateinit var link: DjiLink
@@ -118,9 +123,15 @@ class MainActivity : Activity() {
         ble = BleClient(applicationContext)
         val mac = readOwnMac()
         val macBytes = mac.split(":").mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
-        link = DjiLink(ble, uiScope, macBytes) { msg -> android.util.Log.d("DJIRemote", msg) }
+        link = DjiLink(ble, uiScope, macBytes) { msg ->
+            android.util.Log.d("DJIRemote", msg)
+            appendLog(msg)
+        }
         link.start()
-        wifiManager = CameraWifiManager(applicationContext) { msg -> android.util.Log.d("DJIRemote", msg) }
+        wifiManager = CameraWifiManager(applicationContext) { msg ->
+            android.util.Log.d("DJIRemote", msg)
+            appendLog(msg)
+        }
         gps = GpsPusher(applicationContext, link, uiScope, { msg -> android.util.Log.d("DJIRemote", msg) }, { sats ->
             satCount = sats
         }, onFixState = { fixed -> gpsFix = fixed }, onLocation = { lat, lng ->
@@ -280,6 +291,52 @@ class MainActivity : Activity() {
         root.addView(qsBtn, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.START; marginStart = dp(8) })
+
+        // ---- Scrollable Diagnostics Log Overlay ----
+        logScroll = ScrollView(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.argb(225, 12, 14, 20))
+                cornerRadius = dp(8).toFloat()
+            }
+            visibility = View.GONE
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+        }
+        logTextView = TextView(this).apply {
+            textSize = sp(8.5f)
+            setTextColor(Color.argb(255, 120, 255, 120))
+            typeface = Typeface.MONOSPACE
+            text = "--- Live Diagnostics Log ---\n"
+        }
+        logScroll.addView(logTextView)
+        root.addView(logScroll, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(130)
+        ).apply { gravity = Gravity.BOTTOM; bottomMargin = dp(46); leftMargin = dp(10); rightMargin = dp(10) })
+
+        // ---- LOG toggle button (bottom right) ----
+        logToggleBtn = Button(this).apply {
+            text = "LOG"
+            textSize = sp(9f)
+            setTextColor(Color.WHITE)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.argb(160, 40, 44, 52))
+            }
+            visibility = View.VISIBLE
+            setOnClickListener {
+                logScroll.visibility = if (logScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            }
+        }
+        root.addView(logToggleBtn, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = dp(10); rightMargin = dp(12) })
+
+        // Tap coordText to toggle log as well
+        coordText.setOnClickListener {
+            logScroll.visibility = if (logScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
 
         // ---- RIGHT: disconnect (✕) ----
         disconnectBtn = Button(this).apply {
@@ -701,6 +758,7 @@ class MainActivity : Activity() {
         surfaceView.visibility = View.VISIBLE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         liveBtn.text = "⏳ STREAM..."
+        if (::logScroll.isInitialized) logScroll.visibility = View.VISIBLE
         datalinkClient?.stop()
         val net = wifiManager.findWifiNetwork()
         val ip = wifiManager.getGatewayIp()
@@ -726,6 +784,7 @@ class MainActivity : Activity() {
             }
         ) { msg ->
             android.util.Log.d("DJIRemote", msg)
+            appendLog(msg)
             if (msg.contains("Open ports", ignoreCase = true) ||
                 msg.contains("RX [", ignoreCase = true) ||
                 msg.contains("handshake", ignoreCase = true) ||
@@ -935,6 +994,20 @@ class MainActivity : Activity() {
     }
 
     /* ----------------------------- misc ----------------------------- */
+
+    private fun appendLog(msg: String) {
+        val clean = msg.replace("Datalink: ", "")
+        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        logHistory.add("[$time] $clean")
+        while (logHistory.size > 30) logHistory.poll()
+        val text = logHistory.joinToString("\n")
+        uiScope.launch {
+            if (::logTextView.isInitialized) {
+                logTextView.text = text
+                logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
+    }
 
     private fun getWatchBatteryPercent(): Int {
         return try {

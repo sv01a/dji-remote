@@ -277,7 +277,7 @@ class DatalinkClient(
                 log("Datalink: TCP 7001 PIN warning: ${e.message}")
             }
         } catch (e: Exception) {
-            log("Datalink: TCP 7001 poke ignored/failed: ${e.message}")
+            log("Datalink: TCP 7001 closed (${e.message}) - continuing UDP")
         }
     }
 
