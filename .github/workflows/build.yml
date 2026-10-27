@@ -40,8 +40,8 @@ jobs:
       - name: Build Release APK
         run: |
           ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || {
-            tail -n 50 /tmp/build.log | while IFS= read -r line; do
-              echo "::error title=GradleError::$line"
+            grep -E "(Caused by|FAILURE:|What went wrong|Execution failed for task)" -A 3 /tmp/build.log | head -n 30 | while IFS= read -r line; do
+              echo "::error title=GradleCause::$line"
             done
             exit 1
           }
