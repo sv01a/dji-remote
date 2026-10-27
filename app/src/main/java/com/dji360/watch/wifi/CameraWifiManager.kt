@@ -29,7 +29,13 @@ class CameraWifiManager(
     var activeNetwork: Network? = null
         private set
 
-    fun findWifiNetwork(): Network? {
+    val isCameraWifiConnected: Boolean
+        get() = findCameraWifiNetwork() != null
+
+    val isConnected: Boolean
+        get() = isCameraWifiConnected
+
+    fun findCameraWifiNetwork(): Network? {
         val active = activeNetwork
         if (active != null) {
             val caps = cm.getNetworkCapabilities(active)
@@ -40,21 +46,32 @@ class CameraWifiManager(
         for (net in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(net) ?: continue
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                activeNetwork = net
-                try {
-                    cm.bindProcessToNetwork(net)
-                    log("WiFi: Found and bound to Wi-Fi network: $net")
-                } catch (e: Exception) {
-                    log("WiFi: bindProcessToNetwork error: ${e.message}")
+                val lp = cm.getLinkProperties(net) ?: continue
+                val hasCameraIp = lp.linkAddresses.any {
+                    val h = it.address?.hostAddress ?: ""
+                    h.startsWith("192.168.2.")
                 }
-                return net
+                val hasCameraRoute = lp.routes.any {
+                    it.gateway?.hostAddress == "192.168.2.1"
+                }
+                if (hasCameraIp || hasCameraRoute) {
+                    activeNetwork = net
+                    try {
+                        cm.bindProcessToNetwork(net)
+                        log("WiFi: Found and bound to camera Wi-Fi network: $net")
+                    } catch (e: Exception) {
+                        log("WiFi: bindProcessToNetwork error: ${e.message}")
+                    }
+                    return net
+                }
             }
         }
         return null
     }
 
-    val isConnected: Boolean
-        get() = findWifiNetwork() != null
+    fun findWifiNetwork(): Network? {
+        return findCameraWifiNetwork()
+    }
 
     fun logWifiSummary(): String {
         val net = findWifiNetwork() ?: return "No Wi-Fi Network"
@@ -124,7 +141,7 @@ class CameraWifiManager(
         timeoutMs: Long = 25_000
     ): Boolean {
         // Check if actually connected to a valid Wi-Fi network right now
-        val current = findWifiNetwork()
+        val current = findCameraWifiNetwork()
         if (current != null) {
             log("WiFi: Already connected to camera network: $current")
             return true

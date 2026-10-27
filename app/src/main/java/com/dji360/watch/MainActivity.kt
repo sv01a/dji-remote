@@ -358,7 +358,12 @@ class MainActivity : Activity() {
         ).apply { gravity = Gravity.CENTER_VERTICAL or Gravity.END; marginEnd = dp(8) })
 
         // ---- BOTTOM: recording timer + current mode ----
-        liveBtn = pill("👁 LIVE") { onLiveButton() }
+        liveBtn = pill("👁 LIVE") { onLiveButton() }.apply {
+            setOnLongClickListener {
+                showWifiConfigDialog()
+                true
+            }
+        }
         liveBtn.setOnLongClickListener { showWifiConfigDialog(); true }
         liveBtn.visibility = View.GONE
         root.addView(liveBtn, FrameLayout.LayoutParams(
@@ -641,7 +646,7 @@ class MainActivity : Activity() {
             return
         }
 
-        if (wifiManager.isConnected) {
+        if (wifiManager.isCameraWifiConnected) {
             liveBtn.text = "⏳ STREAM..."
             startLiveStream()
             return
@@ -659,19 +664,7 @@ class MainActivity : Activity() {
             return
         }
 
-        liveBtn.text = "📶..."
-        wifiJob?.cancel()
-        wifiJob = uiScope.launch {
-            val creds = link.queryWifiCredentials(timeoutMs = 2000)
-            if (creds != null) {
-                val (ssid, pass) = creds
-                prefs.edit().putString(PREFS_WIFI_SSID, ssid).putString(PREFS_WIFI_PASS, pass).apply()
-                connectWifiAndStartStream(ssid, pass)
-            } else {
-                liveBtn.text = "👁 LIVE"
-                showWifiConfigDialog(targetSsid)
-            }
-        }
+        showWifiConfigDialog(targetSsid)
     }
 
     private fun connectWifiAndStartStream(ssid: String, pass: String) {
@@ -743,8 +736,13 @@ class MainActivity : Activity() {
 
         AlertDialog.Builder(this)
             .setTitle("Camera Wi-Fi")
-            .setMessage("On camera: Settings → Wireless Connection")
+            .setMessage("Connect to camera hotspot:\nOn camera: Settings → Wireless Connection")
             .setView(layout)
+            .setNeutralButton("Wi-Fi Settings") { _, _ ->
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                } catch (e: Exception) {}
+            }
             .setPositiveButton("Connect") { _, _ ->
                 val s = ssidInput.text.toString().trim()
                 val p = passInput.text.toString().trim()
