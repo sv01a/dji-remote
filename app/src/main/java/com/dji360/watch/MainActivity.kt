@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.NotificationManager
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
@@ -785,6 +786,37 @@ class MainActivity : Activity() {
     private fun startConnect() {
         if (connectJob?.isActive == true) return
         if (!askPermissionsIfRequired()) return
+
+        val bm = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val ad = bm?.adapter
+        if (ad == null) {
+            streamHudStatus = "Bluetooth unavailable on this device"
+            coordText.text = streamHudStatus
+            coordText.visibility = View.VISIBLE
+            Diagnostics.doubleBuzz(applicationContext)
+            return
+        }
+        if (!ad.isEnabled) {
+            streamHudStatus = "Bluetooth is OFF! Turn it ON"
+            coordText.text = streamHudStatus
+            coordText.visibility = View.VISIBLE
+            Diagnostics.doubleBuzz(applicationContext)
+            try {
+                @Suppress("DEPRECATION")
+                if (Build.VERSION.SDK_INT < 33) {
+                    ad.enable()
+                }
+                val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                log("Failed to request Bluetooth enable: ${e.message}")
+            }
+            render(Ui.FAILED, DjiLink.CameraState())
+            return
+        }
+
         link.start()
         connectJob = uiScope.launch {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
