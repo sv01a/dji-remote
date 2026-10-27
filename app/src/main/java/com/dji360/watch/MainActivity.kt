@@ -11,6 +11,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Bundle
 import android.view.Gravity
 import android.view.SurfaceHolder
@@ -341,8 +342,16 @@ class MainActivity : Activity() {
         modeText.text = mode
         modeText.visibility = if (mode.isEmpty()) View.GONE else View.VISIBLE
 
-         // Camera battery, only meaningful once the camera reported it.
-        val bat = if (camera.batteryPercent in 0..100) "🔋 ${camera.batteryPercent}%" else ""
+         // Watch and Camera battery display
+        val watchPct = getWatchBatteryPercent()
+        val watchBat = if (watchPct in 0..100) "⌚ $watchPct%" else ""
+        val camBat = if (camera.batteryPercent in 0..100) "📷 ${camera.batteryPercent}%" else ""
+        val bat = when {
+            watchBat.isNotEmpty() && camBat.isNotEmpty() -> "$watchBat  $camBat"
+            watchBat.isNotEmpty() -> watchBat
+            camBat.isNotEmpty() -> camBat
+            else -> ""
+        }
         batteryText.text = bat
 
         updateGpsIcon()
@@ -895,6 +904,13 @@ class MainActivity : Activity() {
     }
 
     /* ----------------------------- misc ----------------------------- */
+
+    private fun getWatchBatteryPercent(): Int {
+        return try {
+            val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        } catch (e: Exception) { -1 }
+    }
 
     private fun granted(p: String) =
         checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED

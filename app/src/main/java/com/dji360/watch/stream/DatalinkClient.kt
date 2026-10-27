@@ -173,6 +173,7 @@ class DatalinkClient(
                 }
 
                 delay(150)
+                sendRegistration()
                 sendSessionWake()
                 sendLiveGate()
                 sendLiveEntryPrep()
@@ -231,6 +232,18 @@ class DatalinkClient(
             s.connect(InetSocketAddress(cameraIp, CAMERA_TCP_POKE_PORT), 1500)
             tcpSocket = s
             log("Datalink: TCP 7001 connected and held open")
+            try {
+                val pinPayload = byteArrayOf(0x04, 0x6F, 0x73, 0x6D, 0x6F) // packString("osmo")
+                val pinFrame = DumlFrame.build(
+                    DumlFrame.SENDER_APP, DumlFrame.RX_WIFI, 1,
+                    DumlFrame.FLAG_REQUEST, 0x07, 0x45, pinPayload
+                )
+                s.getOutputStream().write(pinFrame)
+                s.getOutputStream().flush()
+                log("Datalink: Sent SetPairingPIN(osmo) to TCP 7001")
+            } catch (e: Exception) {
+                log("Datalink: TCP 7001 PIN warning: ${e.message}")
+            }
         } catch (e: Exception) {
             log("Datalink: TCP 7001 poke ignored/failed: ${e.message}")
         }
@@ -287,6 +300,18 @@ class DatalinkClient(
         } catch (e: Exception) {
             log("Datalink: UDP send error: ${e.message}")
         }
+    }
+
+    private fun sendRegistration() {
+        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        val regFrame = DumlFrame.build(
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x88,
+            byteArrayOf(0x17) + "APP".toByteArray()
+        )
+        val datagram = wrapCommand(regFrame, sessionId, cmdSeq)
+        sendUdp(datagram)
+        log("Datalink: Sent Registration (0x00/0x88)")
     }
 
     private fun sendSessionWake() {
