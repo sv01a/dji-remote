@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Test APK
+    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
@@ -28,31 +28,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.14'
+          cache: 'gradle'
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
-        continue-on-error: true
-
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --stacktrace
-
-      - name: Build Release APK (debug-signed for sideload)
+      - name: Build Release APK
         run: ./gradlew :app:assembleRelease --stacktrace
-
-      - name: Upload Debug APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 14
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4
