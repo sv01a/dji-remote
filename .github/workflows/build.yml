@@ -38,14 +38,7 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Build Release APK
-        run: |
-          ./gradlew :app:assembleRelease --stacktrace --no-daemon > /tmp/build.log 2>&1 || {
-            grep -E "(Caused by|FAILURE:|What went wrong|Execution failed for task)" -A 3 /tmp/build.log | head -n 30 | while IFS= read -r line; do
-              echo "::error title=GradleCause::$line"
-            done
-            exit 1
-          }
-          find app/build/outputs -name "*.apk" || true
+        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4
