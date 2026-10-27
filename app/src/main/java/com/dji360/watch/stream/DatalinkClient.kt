@@ -141,8 +141,8 @@ class DatalinkClient(
             }
 
             try {
-                val s = DatagramSocket(0)
-                val s2 = DatagramSocket(0)
+                val s = DatagramSocket(null)
+                val s2 = DatagramSocket(null)
                 try {
                     network?.bindSocket(s)
                     network?.bindSocket(s2)
@@ -150,21 +150,22 @@ class DatalinkClient(
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
+                s.bind(InetSocketAddress(0))
+                s2.bind(InetSocketAddress(0))
                 try {
                     s.connect(InetAddress.getByName(cameraIp), 9004)
-                    log("Datalink: Connected UDP socket to $cameraIp:9004")
+                    log("Datalink: UDP 9004 connected from ${s.localAddress?.hostAddress}:${s.localPort} -> $cameraIp:9004")
                 } catch (e: Exception) {
                     log("Datalink: UDP 9004 connect error: ${e.message}")
                 }
                 try {
                     s2.connect(InetAddress.getByName(cameraIp), 10004)
-                    log("Datalink: Connected UDP socket to $cameraIp:10004")
+                    log("Datalink: UDP 10004 connected from ${s2.localAddress?.hostAddress}:${s2.localPort} -> $cameraIp:10004")
                 } catch (e: Exception) {
                     log("Datalink: UDP 10004 connect error: ${e.message}")
                 }
                 socket = s
                 socket10k = s2
-                log("Datalink: Local UDP ports 9004:${s.localPort}, 10004:${s2.localPort}")
 
                 baseSeq = (Random().nextInt(0x7F00) and 0xFFF8) or 0x0008
                 sessionId = Random().nextInt(0xFFFF)
@@ -243,9 +244,8 @@ class DatalinkClient(
         val openPorts = mutableListOf<Int>()
         for (p in ports) {
             try {
-                val sock = Socket()
-                try { network?.bindSocket(sock) } catch (e: Exception) {}
-                sock.connect(InetSocketAddress(cameraIp, p), 300)
+                val sock = if (network != null) network.socketFactory.createSocket() else Socket()
+                sock.connect(InetSocketAddress(cameraIp, p), 350)
                 sock.close()
                 openPorts.add(p)
             } catch (e: Exception) {}
@@ -255,12 +255,7 @@ class DatalinkClient(
 
     private fun openTcpPoke() {
         try {
-            val s = Socket()
-            try {
-                network?.bindSocket(s)
-            } catch (e: Exception) {
-                log("Datalink: TCP bindSocket warning: ${e.message}")
-            }
+            val s = if (network != null) network.socketFactory.createSocket() else Socket()
             s.connect(InetSocketAddress(cameraIp, CAMERA_TCP_POKE_PORT), 1500)
             tcpSocket = s
             log("Datalink: TCP 7001 connected and held open")

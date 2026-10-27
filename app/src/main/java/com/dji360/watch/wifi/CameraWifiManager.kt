@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
+import java.net.Inet4Address
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -55,33 +56,60 @@ class CameraWifiManager(
     val isConnected: Boolean
         get() = findWifiNetwork() != null
 
+    fun logWifiSummary(): String {
+        val net = findWifiNetwork() ?: return "No Wi-Fi Network"
+        val lp = cm.getLinkProperties(net) ?: return "No LinkProperties"
+        val iface = lp.interfaceName ?: "wlan"
+        val addrs = lp.linkAddresses.map { it.address.hostAddress }.filter { it != null && it.contains(".") }
+        val routes = lp.routes.map { "${it.destination} -> ${it.gateway?.hostAddress ?: "direct"}" }
+        val summary = "WiFi[$iface]: IPs=$addrs Routes=$routes"
+        log(summary)
+        return summary
+    }
+
     fun getGatewayIp(): String {
         val net = findWifiNetwork() ?: return "192.168.2.1"
         val lp = cm.getLinkProperties(net) ?: return "192.168.2.1"
+
+        // 1. From routes
         for (route in lp.routes) {
             val gateway = route.gateway
-            if (gateway != null && !gateway.isAnyLocalAddress) {
+            if (gateway is Inet4Address && !gateway.isAnyLocalAddress) {
                 val ip = gateway.hostAddress
-                if (!ip.isNullOrEmpty()) return ip
+                if (!ip.isNullOrEmpty() && ip != "0.0.0.0") {
+                    log("WiFi: Gateway from route: $ip")
+                    return ip
+                }
             }
         }
+
+        // 2. From DHCP server
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val dhcp = lp.dhcpServerAddress
-            if (dhcp != null && !dhcp.isAnyLocalAddress) {
+            if (dhcp is Inet4Address && !dhcp.isAnyLocalAddress) {
                 val ip = dhcp.hostAddress
-                if (!ip.isNullOrEmpty()) return ip
+                if (!ip.isNullOrEmpty() && ip != "0.0.0.0") {
+                    log("WiFi: Gateway from DHCP: $ip")
+                    return ip
+                }
             }
         }
-        // Extract camera gateway from own assigned IP (e.g. 192.168.2.X -> 192.168.2.1)
+
+        // 3. From local IPv4 address (derive x.y.z.1)
         for (addr in lp.linkAddresses) {
-            val host = addr.address?.hostAddress ?: continue
-            val parts = host.split(".")
-            if (parts.size == 4 && parts[0] == "192" && parts[1] == "168") {
-                val derived = "${parts[0]}.${parts[1]}.${parts[2]}.1"
-                log("WiFi: Derived camera gateway from assigned IP: $derived")
-                return derived
+            val inet = addr.address
+            if (inet is Inet4Address && !inet.isLoopbackAddress && !inet.isLinkLocalAddress) {
+                val host = inet.hostAddress ?: continue
+                val parts = host.split(".")
+                if (parts.size == 4) {
+                    val derived = "${parts[0]}.${parts[1]}.${parts[2]}.1"
+                    log("WiFi: Derived camera IP from local IP $host -> $derived")
+                    return derived
+                }
             }
         }
+
+        log("WiFi: Gateway fallback to 192.168.2.1")
         return "192.168.2.1"
     }
 

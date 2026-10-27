@@ -775,7 +775,10 @@ class MainActivity : Activity() {
             Diagnostics.doubleBuzz(applicationContext)
             return
         }
+        val wifiSummary = wifiManager.logWifiSummary()
+        appendLog(wifiSummary)
         val ip = wifiManager.getGatewayIp()
+        appendLog("Camera Gateway: $ip")
         var lastPkt = 0
         val client = DatalinkClient(
             scope = uiScope,
