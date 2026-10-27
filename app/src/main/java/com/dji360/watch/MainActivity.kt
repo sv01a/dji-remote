@@ -785,7 +785,13 @@ class MainActivity : Activity() {
             activeScan = test
             val scanMs = 3500L
             test.start(scanMs, targetMac = lastMac, Diagnostics.BleScanTest.Listener(
-                onProgress = { },
+                onProgress = { msg ->
+                    uiScope.launch {
+                        streamHudStatus = msg
+                        coordText.text = msg
+                        coordText.visibility = View.VISIBLE
+                    }
+                },
                 onFinished = { _ -> }
             ))
 
@@ -796,32 +802,70 @@ class MainActivity : Activity() {
             // Crucial for BLE stability: give radio 250ms to finish scan teardown before connectGatt
             delay(250)
 
+            val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            var targetMac: String? = null
+            var devName: String = "Osmo360"
+
             val dji = test.djiCandidates()
-            if (dji.isEmpty()) {
+            if (dji.isNotEmpty()) {
+                val (mac, best) = if (lastMac != null && dji.containsKey(lastMac)) {
+                    lastMac to dji[lastMac]!!
+                } else {
+                    val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
+                    bestEntry.key to bestEntry.value
+                }
+                targetMac = mac
+                devName = best.name ?: "Osmo360"
+            } else if (lastMac != null && test.allSeen().containsKey(lastMac)) {
+                targetMac = lastMac
+                devName = test.allSeen()[lastMac]?.name ?: "SavedCamera"
+                streamHudStatus = "BLE: Found saved camera by MAC $targetMac"
+            } else {
+                val bonded = ad?.bondedDevices?.firstOrNull {
+                    it.name?.contains("OSMO", true) == true || it.name?.contains("DJI", true) == true
+                }
+                if (bonded != null) {
+                    targetMac = bonded.address
+                    devName = bonded.name ?: "Osmo360"
+                    streamHudStatus = "BLE: Trying bonded ${bonded.name}..."
+                } else if (lastMac != null) {
+                    targetMac = lastMac
+                    devName = "SavedCamera"
+                    streamHudStatus = "BLE: Direct connecting to saved $lastMac..."
+                }
+            }
+
+            if (targetMac == null) {
+                val totalSeen = test.allSeen().size
+                streamHudStatus = "BLE: Camera not found (scanned $totalSeen devices)"
+                coordText.text = streamHudStatus
                 Diagnostics.doubleBuzz(applicationContext)
                 render(Ui.FAILED, DjiLink.CameraState())
                 return@launch
             }
 
-            // Prefer last connected camera if present in scan results, otherwise pick strongest signal
-            val (targetMac, best) = if (lastMac != null && dji.containsKey(lastMac)) {
-                lastMac to dji[lastMac]!!
-            } else {
-                val bestEntry = dji.entries.maxByOrNull { it.value.rssi }!!
-                bestEntry.key to bestEntry.value
-            }
-
-            val ad = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
             val dev = ad?.getRemoteDevice(targetMac)
             if (dev == null) {
+                streamHudStatus = "BLE: Remote device null for $targetMac"
+                coordText.text = streamHudStatus
                 render(Ui.FAILED, DjiLink.CameraState()); return@launch
             }
-            link.deviceName = best.name ?: "Osmo360"
+
+            streamHudStatus = "BLE: Connecting to $devName ($targetMac)..."
+            coordText.text = streamHudStatus
+            link.deviceName = devName
+
             if (!ble.connect(dev)) {
+                streamHudStatus = "BLE: Connect failed to $targetMac"
+                coordText.text = streamHudStatus
                 Diagnostics.doubleBuzz(applicationContext)
                 render(Ui.FAILED, DjiLink.CameraState())
                 return@launch
             }
+
+            streamHudStatus = "BLE: Handshaking with $devName..."
+            coordText.text = streamHudStatus
+
             // First-ever successful connection → verify_mode=1 (camera shows the
             // confirmation popup once). Every later connection uses verify_mode=0
             // so the camera decides by its saved pairing history.
@@ -834,9 +878,15 @@ class MainActivity : Activity() {
                 reconnectAttempt = 0
                 if (!gpsRunning) { gps.start(); gpsRunning = true }
                 Diagnostics.shortBuzz(applicationContext)
+                streamHudStatus = "BLE: Connected to $devName"
+                coordText.text = streamHudStatus
             } else if (link.phase.value == DjiLink.Phase.REJECTED) {
+                streamHudStatus = "BLE: Handshake rejected by camera"
+                coordText.text = streamHudStatus
                 Diagnostics.doubleBuzz(applicationContext)
             } else {
+                streamHudStatus = "BLE: Handshake failed (phase=${link.phase.value})"
+                coordText.text = streamHudStatus
                 Diagnostics.doubleBuzz(applicationContext)
                 ble.disconnect()
                 render(Ui.FAILED, DjiLink.CameraState())

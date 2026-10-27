@@ -188,6 +188,9 @@ object Diagnostics {
                 }
             }
             r.scanRecord?.serviceUuids?.forEach { u -> row.svcs += u.uuid.toString().uppercase(Locale.US) }
+            val djiCount = rows.count { it.value.isDji }
+            val djiMark = if (row.isDji) " [DJI!]" else ""
+            listener?.onProgress("Scan: ${rows.size} devs (DJI: $djiCount)$djiMark")
             if (row.isDji) {
                 onTargetFound?.invoke(addr, row)
             }
