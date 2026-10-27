@@ -726,7 +726,9 @@ class MainActivity : Activity() {
             }
         ) { msg ->
             android.util.Log.d("DJIRemote", msg)
-            if (msg.contains("handshake", ignoreCase = true) ||
+            if (msg.contains("Open ports", ignoreCase = true) ||
+                msg.contains("RX [", ignoreCase = true) ||
+                msg.contains("handshake", ignoreCase = true) ||
                 msg.contains("ack", ignoreCase = true) ||
                 msg.contains("udp", ignoreCase = true) ||
                 msg.contains("tcp", ignoreCase = true) ||

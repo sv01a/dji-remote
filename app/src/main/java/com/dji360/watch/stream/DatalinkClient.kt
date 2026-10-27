@@ -110,8 +110,10 @@ class DatalinkClient(
     }
 
     private var socket: DatagramSocket? = null
+    private var socket10k: DatagramSocket? = null
     private var tcpSocket: Socket? = null
     private var rxJob: Job? = null
+    private var rxJob10k: Job? = null
     private var pumpJob: Job? = null
     private var heartbeatJob: Job? = null
 
@@ -133,32 +135,43 @@ class DatalinkClient(
 
         scope.launch(Dispatchers.IO) {
             launch(Dispatchers.IO) {
+                probeCameraPorts()
                 log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT at $cameraIp...")
                 openTcpPoke()
             }
 
             try {
                 val s = DatagramSocket(0)
+                val s2 = DatagramSocket(0)
                 try {
                     network?.bindSocket(s)
-                    log("Datalink: Bound DatagramSocket to network")
+                    network?.bindSocket(s2)
+                    log("Datalink: Bound dual DatagramSockets to network")
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
                 try {
-                    s.connect(InetAddress.getByName(cameraIp), CAMERA_UDP_PORT)
-                    log("Datalink: Connected UDP socket to $cameraIp:$CAMERA_UDP_PORT")
+                    s.connect(InetAddress.getByName(cameraIp), 9004)
+                    log("Datalink: Connected UDP socket to $cameraIp:9004")
                 } catch (e: Exception) {
-                    log("Datalink: UDP connect error: ${e.message}")
+                    log("Datalink: UDP 9004 connect error: ${e.message}")
+                }
+                try {
+                    s2.connect(InetAddress.getByName(cameraIp), 10004)
+                    log("Datalink: Connected UDP socket to $cameraIp:10004")
+                } catch (e: Exception) {
+                    log("Datalink: UDP 10004 connect error: ${e.message}")
                 }
                 socket = s
-                log("Datalink: Local UDP socket bound to port ${s.localPort}")
+                socket10k = s2
+                log("Datalink: Local UDP ports 9004:${s.localPort}, 10004:${s2.localPort}")
 
                 baseSeq = (Random().nextInt(0x7F00) and 0xFFF8) or 0x0008
                 sessionId = Random().nextInt(0xFFFF)
                 cmdSeq = baseSeq + 100
 
-                rxJob = launch(Dispatchers.IO) { receiveLoop(s) }
+                rxJob = launch(Dispatchers.IO) { receiveLoop(s, 9004) }
+                rxJob10k = launch(Dispatchers.IO) { receiveLoop(s2, 10004) }
 
                 // Burst handshake packets until camera replies or up to 8 attempts
                 launch(Dispatchers.IO) {
@@ -207,10 +220,14 @@ class DatalinkClient(
         if (!isRunning) return
         isRunning = false
         rxJob?.cancel(); rxJob = null
+        rxJob10k?.cancel(); rxJob10k = null
         pumpJob?.cancel(); pumpJob = null
         heartbeatJob?.cancel(); heartbeatJob = null
         try {
             socket?.close()
+        } catch (e: Exception) {}
+        try {
+            socket10k?.close()
         } catch (e: Exception) {}
         socket = null
         try {
@@ -219,6 +236,21 @@ class DatalinkClient(
         tcpSocket = null
         depacketizer.reset()
         log("Datalink: Stopped and sockets closed")
+    }
+
+    private fun probeCameraPorts() {
+        val ports = listOf(7001, 80, 8080, 554, 10004)
+        val openPorts = mutableListOf<Int>()
+        for (p in ports) {
+            try {
+                val sock = Socket()
+                try { network?.bindSocket(sock) } catch (e: Exception) {}
+                sock.connect(InetSocketAddress(cameraIp, p), 300)
+                sock.close()
+                openPorts.add(p)
+            } catch (e: Exception) {}
+        }
+        log("Datalink: Open ports on $cameraIp: $openPorts")
     }
 
     private fun openTcpPoke() {
@@ -249,7 +281,7 @@ class DatalinkClient(
         }
     }
 
-    private fun receiveLoop(s: DatagramSocket) {
+    private fun receiveLoop(s: DatagramSocket, port: Int) {
         val buf = ByteArray(4096)
         val packet = DatagramPacket(buf, buf.size)
         var receivedVideoCount = 0
@@ -263,7 +295,7 @@ class DatalinkClient(
                 val pktType = buf[6]
                 val seq = (buf[4].toInt() and 0xFF) or ((buf[5].toInt() and 0xFF) shl 8)
 
-                log("Datalink: RX pkt=0x%02X seq=%d len=%d".format(pktType, seq, len))
+                log("Datalink: RX [$port] pkt=0x%02X seq=%d len=%d".format(pktType, seq, len))
                 when (pktType) {
                     PKT_VIDEO -> {
                         latestVideoSeq = seq
@@ -287,18 +319,27 @@ class DatalinkClient(
     }
 
     private fun sendUdp(data: ByteArray) {
-        val s = socket ?: return
-        if (s.isClosed) return
-        try {
-            val p = if (s.isConnected) {
-                DatagramPacket(data, data.size)
-            } else {
-                val addr = InetAddress.getByName(cameraIp)
-                DatagramPacket(data, data.size, addr, CAMERA_UDP_PORT)
+        socket?.let { s ->
+            if (!s.isClosed) {
+                try {
+                    val p = if (s.isConnected) DatagramPacket(data, data.size)
+                    else DatagramPacket(data, data.size, InetAddress.getByName(cameraIp), 9004)
+                    s.send(p)
+                } catch (e: Exception) {
+                    log("Datalink: UDP 9004 send error: ${e.message}")
+                }
             }
-            s.send(p)
-        } catch (e: Exception) {
-            log("Datalink: UDP send error: ${e.message}")
+        }
+        socket10k?.let { s2 ->
+            if (!s2.isClosed) {
+                try {
+                    val p = if (s2.isConnected) DatagramPacket(data, data.size)
+                    else DatagramPacket(data, data.size, InetAddress.getByName(cameraIp), 10004)
+                    s2.send(p)
+                } catch (e: Exception) {
+                    log("Datalink: UDP 10004 send error: ${e.message}")
+                }
+            }
         }
     }
 
