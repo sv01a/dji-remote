@@ -21,6 +21,7 @@ class LiveVideoDecoder(
 
     var detectedMime: String = "init"
         private set
+    val codecMime: String get() = detectedMime
     var frameCount = 0L
         private set
     val renderedFrames: Long get() = frameCount
