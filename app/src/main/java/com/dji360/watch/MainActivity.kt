@@ -16,8 +16,10 @@ import android.os.Build
 import android.os.BatteryManager
 import android.os.Bundle
 import android.view.Gravity
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
+import android.view.Surface
+import android.graphics.SurfaceTexture
+import android.graphics.Matrix
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -66,7 +68,9 @@ class MainActivity : Activity() {
     private lateinit var coordText: TextView
     private lateinit var disconnectBtn: Button
     private lateinit var liveBtn: Button
-    private lateinit var surfaceView: SurfaceView
+    private lateinit var textureView: TextureView
+    private lateinit var lensBtn: Button
+    private var lensMode: Int = 0 // 0: FRONT, 1: REAR, 2: DUAL
     private lateinit var rootView: FrameLayout
     private lateinit var logScroll: ScrollView
     private lateinit var logTextView: TextView
@@ -228,26 +232,36 @@ class MainActivity : Activity() {
         rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val root = rootView
 
-        // ---- BACKGROUND: SurfaceView for Live Viewfinder ----
-        surfaceView = SurfaceView(this).apply {
-            setZOrderMediaOverlay(false)
+        // ---- BACKGROUND: TextureView for Live Viewfinder (supports hardware lens cropping) ----
+        textureView = TextureView(this).apply {
             visibility = View.VISIBLE
-            holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(h: SurfaceHolder) {
-                    val dec = LiveVideoDecoder(h.surface) { msg ->
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                    val dec = LiveVideoDecoder(Surface(st)) { msg ->
                         android.util.Log.d("DJIRemote", msg)
                     }
                     decoder = dec
                     dec.start()
+                    post { applyLensTransform() }
                 }
-                override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hPx: Int) {}
-                override fun surfaceDestroyed(h: SurfaceHolder) {
+
+                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                    applyLensTransform()
+                }
+
+                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
                     decoder?.stop()
                     decoder = null
+                    return true
                 }
-            })
+
+                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+            }
+            setOnClickListener {
+                if (decoder != null) cycleLensMode()
+            }
         }
-        root.addView(surfaceView, FrameLayout.LayoutParams(
+        root.addView(textureView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
@@ -332,6 +346,25 @@ class MainActivity : Activity() {
         root.addView(logToggleBtn, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.BOTTOM or Gravity.END; bottomMargin = dp(10); rightMargin = dp(12) })
+
+        // ---- LENS toggle button (bottom left) ----
+        lensBtn = Button(this).apply {
+            text = "📷 FRONT"
+            textSize = sp(9f)
+            setTextColor(Color.WHITE)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(12).toFloat()
+                setColor(Color.argb(160, 40, 44, 52))
+            }
+            visibility = View.GONE
+            setOnClickListener { cycleLensMode() }
+        }
+        root.addView(lensBtn, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = dp(10); leftMargin = dp(12) })
 
         // Tap coordText to toggle log as well
         coordText.setOnClickListener {
@@ -762,8 +795,43 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun applyLensTransform() {
+        if (!::textureView.isInitialized) return
+        val w = textureView.width.toFloat()
+        val h = textureView.height.toFloat()
+        if (w <= 0 || h <= 0) return
+
+        val matrix = Matrix()
+        when (lensMode) {
+            0 -> {
+                // FRONT lens (Left fisheye circle centered)
+                matrix.setScale(2.0f, 2.0f, 0f, h / 2f)
+                if (::lensBtn.isInitialized) lensBtn.text = "📷 FRONT"
+            }
+            1 -> {
+                // REAR lens (Right fisheye circle centered)
+                matrix.setScale(2.0f, 2.0f, w, h / 2f)
+                if (::lensBtn.isInitialized) lensBtn.text = "📷 REAR"
+            }
+            2 -> {
+                // DUAL lens (Both hemispheres side by side)
+                matrix.reset()
+                if (::lensBtn.isInitialized) lensBtn.text = "🌐 360"
+            }
+        }
+        textureView.setTransform(matrix)
+    }
+
+    private fun cycleLensMode() {
+        lensMode = (lensMode + 1) % 3
+        applyLensTransform()
+        Diagnostics.shortBuzz(applicationContext)
+    }
+
     private fun startLiveStream() {
-        surfaceView.visibility = View.VISIBLE
+        textureView.visibility = View.VISIBLE
+        if (::lensBtn.isInitialized) lensBtn.visibility = View.VISIBLE
+        applyLensTransform()
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         liveBtn.text = "⏳ STREAM..."
         if (::logScroll.isInitialized) logScroll.visibility = View.VISIBLE
@@ -831,7 +899,8 @@ class MainActivity : Activity() {
         wifiJob?.cancel(); wifiJob = null
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
-        surfaceView.visibility = View.GONE
+        textureView.visibility = View.GONE
+        if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         liveBtn.text = "👁 LIVE"
     }
