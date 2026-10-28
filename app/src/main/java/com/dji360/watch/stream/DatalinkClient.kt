@@ -295,7 +295,7 @@ class DatalinkClient(
                             if (duml != null) {
                                 val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
                                 log("Datalink: DUML 0x%02X/0x%02X ret=%s (rcv=0x%02X) len=%d".format(
-                                    duml.cmdSet, duml.cmdId, ret, duml.receiverId, len
+                                    duml.cmdSet, duml.cmdId, ret, duml.receiver, len
                                 ))
                             }
                         }
