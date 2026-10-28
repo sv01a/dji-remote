@@ -29,6 +29,27 @@ class CameraWifiManager(
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var highPriorityCallback: ConnectivityManager.NetworkCallback? = null
 
+    fun suggestNetwork(ssid: String, pass: String): Boolean {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            try {
+                val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager ?: return false
+                val builder = android.net.wifi.WifiNetworkSuggestion.Builder()
+                    .setSsid(ssid)
+                    .setIsAppInteractionRequired(false)
+                if (pass.isNotEmpty()) {
+                    builder.setWpa2Passphrase(pass)
+                }
+                val suggestion = builder.build()
+                val status = wm.addNetworkSuggestions(listOf(suggestion))
+                log("WiFi: Added network suggestion for $ssid (status=$status)")
+                return status == android.net.wifi.WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS
+            } catch (e: Exception) {
+                log("WiFi: addNetworkSuggestions failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
     fun acquireWifiLock() {
         try {
             if (wifiLock == null) {

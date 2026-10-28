@@ -810,6 +810,7 @@ class MainActivity : Activity() {
                         .putString(PREFS_WIFI_SSID, s)
                         .putString(PREFS_WIFI_PASS, p)
                         .apply()
+                    wifiManager.suggestNetwork(s, p)
                     connectWifiAndStartStream(s, p)
                 }
             }
