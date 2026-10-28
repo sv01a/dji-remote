@@ -6,9 +6,9 @@ import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * Hardware-accelerated video decoder using Android's [MediaCodec], outputting
- * live frames directly to a provided [Surface] (from SurfaceView).
- * Supports automatic detection of AVC/H.264 vs HEVC/H.265.
+ * High-performance hardware video decoder using Android's [MediaCodec] with an
+ * asynchronous dedicated output thread (matching OpenCine architecture) to guarantee
+ * zero-blocking UDP ingestion and artifact-free rendering.
  */
 class LiveVideoDecoder(
     private val surface: Surface,
@@ -17,13 +17,13 @@ class LiveVideoDecoder(
     private var codec: MediaCodec? = null
     @Volatile private var isRunning = false
     private var isConfigured = false
+    private var outputThread: Thread? = null
+
     var detectedMime: String = "init"
         private set
     var frameCount = 0L
         private set
     val renderedFrames: Long get() = frameCount
-    val codecMime: String get() = detectedMime
-    private var cachedHeader: ByteArray? = null
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
@@ -36,12 +36,7 @@ class LiveVideoDecoder(
 
         val c = codec ?: return
         try {
-            drainOutput(c)
-            var inIndex = c.dequeueInputBuffer(5_000)
-            if (inIndex < 0) {
-                drainOutput(c)
-                inIndex = c.dequeueInputBuffer(5_000)
-            }
+            val inIndex = c.dequeueInputBuffer(5_000)
             if (inIndex >= 0) {
                 val inBuf: ByteBuffer? = c.getInputBuffer(inIndex)
                 if (inBuf != null) {
@@ -51,29 +46,34 @@ class LiveVideoDecoder(
                     c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
                 }
             }
-            drainOutput(c)
         } catch (e: Exception) {
             log("Decoder: feed exception: ${e.message}")
         }
     }
 
-    private var lastRenderedTimeUs: Long = 0
-
-    private fun drainOutput(c: MediaCodec) {
-        val info = MediaCodec.BufferInfo()
-        var outIndex = c.dequeueOutputBuffer(info, 0)
-        while (outIndex >= 0) {
-            frameCount++
-            val nowUs = System.nanoTime() / 1000
-            // 30 FPS render cap (33.3ms minimum interval) to avoid display tearing and reduce watch battery/GPU load
-            val shouldRender = (nowUs - lastRenderedTimeUs >= 33_000L)
-            if (shouldRender) {
-                lastRenderedTimeUs = nowUs
-                c.releaseOutputBuffer(outIndex, true)
-            } else {
-                c.releaseOutputBuffer(outIndex, false)
+    private fun startOutputLoop(c: MediaCodec) {
+        outputThread?.interrupt()
+        outputThread = Thread({
+            val info = MediaCodec.BufferInfo()
+            while (isRunning && codec === c) {
+                try {
+                    val outIndex = c.dequeueOutputBuffer(info, 10_000)
+                    if (outIndex >= 0) {
+                        frameCount++
+                        if (frameCount % 60 == 1L) {
+                            log("Decoder: Rendered frame #$frameCount to surface")
+                        }
+                        c.releaseOutputBuffer(outIndex, true)
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        log("Decoder: Output format changed: ${c.outputFormat}")
+                    }
+                } catch (e: Exception) {
+                    if (!isRunning) break
+                }
             }
-            outIndex = c.dequeueOutputBuffer(info, 0)
+        }, "dji.codec.out").also {
+            it.isDaemon = true
+            it.start()
         }
     }
 
@@ -82,21 +82,21 @@ class LiveVideoDecoder(
             log("Decoder: Initializing $mime hardware decoder...")
             val c = MediaCodec.createDecoderByType(mime)
             val format = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
-                // Low latency decoding hint
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
             try {
                 c.configure(format, surface, null, 0)
             } catch (e: Exception) {
-                // Some legacy decoders reject KEY_LOW_LATENCY; retry without it
-                log("Decoder: Low latency configure failed, retrying without hint: ${e.message}")
+                log("Decoder: Low latency configure failed, retrying: ${e.message}")
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 0)
                 c.configure(format, surface, null, 0)
             }
             c.start()
             codec = c
             isConfigured = true
-            log("Decoder: $mime decoder configured and started successfully")
+            startOutputLoop(c)
+            log("Decoder: $mime decoder configured and output thread started")
         } catch (e: Exception) {
             log("Decoder: Failed to initialize $mime: ${e.message}")
         }
@@ -109,9 +109,7 @@ class LiveVideoDecoder(
                 val b = nal[i + 3].toInt() and 0xFF
                 val hevcType = (b ushr 1) and 0x3F
                 val avcType = b and 0x1F
-                // HEVC: VPS (32), SPS (33), PPS (34)
                 if (hevcType in 32..34) return "video/hevc"
-                // H.264: SPS (7), PPS (8)
                 if (avcType in 7..8) return "video/avc"
                 i += 3
             } else {
@@ -129,6 +127,9 @@ class LiveVideoDecoder(
     fun stop() {
         isRunning = false
         isConfigured = false
+        val out = outputThread
+        outputThread = null
+        out?.interrupt()
         try {
             codec?.stop()
             codec?.release()

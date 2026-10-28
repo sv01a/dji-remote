@@ -829,6 +829,7 @@ class MainActivity : Activity() {
         lensMode = (lensMode + 1) % 3
         applyLensTransform()
         Diagnostics.shortBuzz(applicationContext)
+        datalinkClient?.requestKeyframe()
     }
 
     private fun startLiveStream() {

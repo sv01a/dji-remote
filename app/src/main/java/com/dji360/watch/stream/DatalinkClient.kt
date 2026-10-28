@@ -421,6 +421,14 @@ class DatalinkClient(
         log("Datalink: Sent Live Entry Prep (0x02/0x68 seq=$cmdSeq)")
     }
 
+    fun requestKeyframe() {
+        scope.launch(Dispatchers.IO) {
+            log("Datalink: Requesting fresh IDR keyframe from camera...")
+            sendLiveViewEnable(0x08)
+            sendLiveViewEnable(0x41)
+        }
+    }
+
     private fun sendLiveViewEnable(rcv: Int) {
         dumlSeq = (dumlSeq + 1) and 0xFFFF
         val payload = byteArrayOf(0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
