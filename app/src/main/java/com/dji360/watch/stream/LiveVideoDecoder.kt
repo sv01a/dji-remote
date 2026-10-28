@@ -36,7 +36,7 @@ class LiveVideoDecoder(
 
         val c = codec ?: return
         try {
-            val inIndex = c.dequeueInputBuffer(10_000)
+            val inIndex = c.dequeueInputBuffer(0)
             if (inIndex >= 0) {
                 val inBuf: ByteBuffer? = c.getInputBuffer(inIndex)
                 if (inBuf != null) {

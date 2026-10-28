@@ -16,10 +16,8 @@ import android.os.Build
 import android.os.BatteryManager
 import android.os.Bundle
 import android.view.Gravity
-import android.view.TextureView
-import android.view.Surface
-import android.graphics.SurfaceTexture
-import android.graphics.Matrix
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -68,7 +66,7 @@ class MainActivity : Activity() {
     private lateinit var coordText: TextView
     private lateinit var disconnectBtn: Button
     private lateinit var liveBtn: Button
-    private lateinit var textureView: TextureView
+    private lateinit var surfaceView: SurfaceView
     private lateinit var lensBtn: Button
     private var lensMode: Int = 0 // 0: FRONT, 1: REAR, 2: DUAL
     private lateinit var rootView: FrameLayout
@@ -232,12 +230,13 @@ class MainActivity : Activity() {
         rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val root = rootView
 
-        // ---- BACKGROUND: TextureView for Live Viewfinder (supports hardware lens cropping) ----
-        textureView = TextureView(this).apply {
+        // ---- BACKGROUND: SurfaceView for Live Viewfinder (Zero-copy Direct Hardware Overlay) ----
+        surfaceView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(false)
             visibility = View.VISIBLE
-            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                    val dec = LiveVideoDecoder(Surface(st)) { msg ->
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(h: SurfaceHolder) {
+                    val dec = LiveVideoDecoder(h.surface) { msg ->
                         android.util.Log.d("DJIRemote", msg)
                     }
                     decoder = dec
@@ -245,23 +244,20 @@ class MainActivity : Activity() {
                     post { applyLensTransform() }
                 }
 
-                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hPx: Int) {
                     applyLensTransform()
                 }
 
-                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                override fun surfaceDestroyed(h: SurfaceHolder) {
                     decoder?.stop()
                     decoder = null
-                    return true
                 }
-
-                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-            }
+            })
             setOnClickListener {
                 if (decoder != null) cycleLensMode()
             }
         }
-        root.addView(textureView, FrameLayout.LayoutParams(
+        root.addView(surfaceView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
@@ -796,30 +792,37 @@ class MainActivity : Activity() {
     }
 
     private fun applyLensTransform() {
-        if (!::textureView.isInitialized) return
-        val w = textureView.width.toFloat()
-        val h = textureView.height.toFloat()
+        if (!::surfaceView.isInitialized) return
+        val w = surfaceView.width.toFloat()
+        val h = surfaceView.height.toFloat()
         if (w <= 0 || h <= 0) return
 
-        val matrix = Matrix()
         when (lensMode) {
             0 -> {
-                // FRONT lens (Left fisheye circle centered)
-                matrix.setScale(2.0f, 2.0f, 0f, h / 2f)
+                // FRONT lens (Left circle scaled 2x and centered)
+                surfaceView.pivotX = 0f
+                surfaceView.pivotY = h / 2f
+                surfaceView.scaleX = 2.0f
+                surfaceView.scaleY = 2.0f
                 if (::lensBtn.isInitialized) lensBtn.text = "📷 FRONT"
             }
             1 -> {
-                // REAR lens (Right fisheye circle centered)
-                matrix.setScale(2.0f, 2.0f, w, h / 2f)
+                // REAR lens (Right circle scaled 2x and centered)
+                surfaceView.pivotX = w
+                surfaceView.pivotY = h / 2f
+                surfaceView.scaleX = 2.0f
+                surfaceView.scaleY = 2.0f
                 if (::lensBtn.isInitialized) lensBtn.text = "📷 REAR"
             }
             2 -> {
-                // DUAL lens (Both hemispheres side by side)
-                matrix.reset()
+                // DUAL lens (360 both circles)
+                surfaceView.pivotX = w / 2f
+                surfaceView.pivotY = h / 2f
+                surfaceView.scaleX = 1.0f
+                surfaceView.scaleY = 1.0f
                 if (::lensBtn.isInitialized) lensBtn.text = "🌐 360"
             }
         }
-        textureView.setTransform(matrix)
     }
 
     private fun cycleLensMode() {
@@ -829,7 +832,7 @@ class MainActivity : Activity() {
     }
 
     private fun startLiveStream() {
-        textureView.visibility = View.VISIBLE
+        surfaceView.visibility = View.VISIBLE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.VISIBLE
         applyLensTransform()
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
@@ -899,7 +902,7 @@ class MainActivity : Activity() {
         wifiJob?.cancel(); wifiJob = null
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
-        textureView.visibility = View.GONE
+        surfaceView.visibility = View.GONE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         liveBtn.text = "👁 LIVE"
