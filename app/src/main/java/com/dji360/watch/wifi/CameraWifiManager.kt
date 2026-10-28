@@ -26,6 +26,64 @@ class CameraWifiManager(
     private val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var highPriorityCallback: ConnectivityManager.NetworkCallback? = null
+
+    fun acquireWifiLock() {
+        try {
+            if (wifiLock == null) {
+                val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                @Suppress("DEPRECATION")
+                wifiLock = wm?.createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DJIRemote:WifiLock")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+                log("WiFi: High-perf WifiLock acquired")
+            }
+        } catch (e: Exception) {
+            log("WiFi: Failed to acquire WifiLock: ${e.message}")
+        }
+
+        try {
+            if (highPriorityCallback == null) {
+                val req = NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build()
+                val cb = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        log("WiFi: High-priority Wi-Fi network active: $network")
+                        activeNetwork = network
+                        cm.bindProcessToNetwork(network)
+                    }
+                    override fun onLost(network: Network) {
+                        log("WiFi: High-priority Wi-Fi network lost: $network")
+                    }
+                }
+                highPriorityCallback = cb
+                cm.requestNetwork(req, cb)
+                log("WiFi: High-priority NetworkRequest registered")
+            }
+        } catch (e: Exception) {
+            log("WiFi: requestNetwork exception: ${e.message}")
+        }
+    }
+
+    fun releaseWifiLock() {
+        try {
+            wifiLock?.let {
+                if (it.isHeld) it.release()
+            }
+            wifiLock = null
+        } catch (e: Exception) {}
+
+        try {
+            highPriorityCallback?.let { cm.unregisterNetworkCallback(it) }
+            highPriorityCallback = null
+        } catch (e: Exception) {}
+        log("WiFi: WifiLock and High-priority request released")
+    }
+
     var activeNetwork: Network? = null
         private set
 

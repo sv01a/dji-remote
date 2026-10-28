@@ -173,6 +173,17 @@ class MainActivity : Activity() {
         return "00:00:00:00:00:00"
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::surfaceView.isInitialized && surfaceView.visibility == View.VISIBLE && datalinkClient == null) {
+            wifiManager.acquireWifiLock()
+            if (wifiManager.isCameraWifiConnected) {
+                appendLog("WiFi: Camera network detected on resume, starting live stream...")
+                startLiveStream()
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         setDndMode(false)
@@ -678,9 +689,21 @@ class MainActivity : Activity() {
             return
         }
 
+        wifiManager.acquireWifiLock()
+
         if (wifiManager.isCameraWifiConnected) {
             liveBtn.text = "⏳ STREAM..."
             startLiveStream()
+            return
+        }
+
+        if (isWatchDevice) {
+            liveBtn.text = "🔗 WI-FI..."
+            surfaceView.visibility = View.VISIBLE
+            android.widget.Toast.makeText(applicationContext, "Connect watch to Camera Wi-Fi", android.widget.Toast.LENGTH_LONG).show()
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+            } catch (e: Exception) {}
             return
         }
 
@@ -906,6 +929,7 @@ class MainActivity : Activity() {
         wifiJob?.cancel(); wifiJob = null
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
+        wifiManager.releaseWifiLock()
         surfaceView.visibility = View.GONE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
