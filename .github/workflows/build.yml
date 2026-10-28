@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Test APK
+    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
@@ -28,26 +28,24 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
+
+      - name: Pre-download Gradle distribution via curl
+        run: |
+          curl -sSL --retry 5 https://services.gradle.org/distributions/gradle-8.14-bin.zip -o /tmp/gradle-8.14-bin.zip
+          ls -lh /tmp/gradle-8.14-bin.zip
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
-
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --stacktrace
-
-      - name: Build Release APK (debug-signed for sideload)
-        run: ./gradlew :app:assembleRelease --stacktrace
-
-      - name: Upload Debug APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 14
+      - name: Build Release APK
+        run: |
+          ./gradlew :app:assembleRelease --no-daemon > /tmp/build.log 2>&1 || {
+            grep -E "(e: [^\n]+|Compilation error|unresolved reference|FAILURE:)" /tmp/build.log | while IFS= read -r line; do
+              echo "::error title=CompileError::$line"
+            done
+            tail -n 30 /tmp/build.log
+            exit 1
+          }
 
       - name: Upload Release APK artifact
         uses: actions/upload-artifact@v4

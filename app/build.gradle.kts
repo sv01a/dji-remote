@@ -49,20 +49,28 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        create("sideload") {
+            storeFile = file("sideload.jks")
+            storePassword = "android"
+            keyAlias = "dji-remote"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
         }
         release {
-            // Shrunk + signed with the debug key so the APK can be sideloaded
-            // straight onto the watch (personal use; no Play publishing).
+            // Stable permanent key so sideloaded updates install cleanly over previous builds
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("sideload")
         }
     }
 
