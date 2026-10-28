@@ -72,8 +72,8 @@ class DatalinkClient(
             return b
         }
 
-        fun wrapCommand(dumlFrame: ByteArray, sessionId: Int, seq: Int): ByteArray {
-            val routing = routingHeader(seq)
+        fun wrapCommand(dumlFrame: ByteArray, sessionId: Int, seq: Int, counter: Int = 1): ByteArray {
+            val routing = routingHeader(seq, counter)
             val payload = routing + dumlFrame
             val header = transportHeader(PKT_COMMAND, payload.size, sessionId, seq)
             return header + payload
@@ -121,9 +121,15 @@ class DatalinkClient(
     @Volatile var latestVideoSeq: Int = 0
         private set
 
+    @Volatile var handshakeAcked: Boolean = false
+        private set
+
     private var baseSeq: Int = 0x0068
-    private var cmdSeq: Int = 0x1000
+    private var cmdSeq: Int = 0
+    private var dumlSeq: Int = 0xA000
+    private var cmdCounter: Int = 0
     private var sessionId: Int = 0x1234
+    private val sendLock = Any()
     private val depacketizer = VideoDepacketizer(onVideoFrame)
 
     fun start() {
@@ -155,42 +161,44 @@ class DatalinkClient(
 
                 rxJob = launch(Dispatchers.IO) { receiveLoop(s, 9004) }
 
-                // Burst handshake packets until camera replies or up to 8 attempts
+                // Burst handshake packets until camera window is seeded
                 launch(Dispatchers.IO) {
                     var hsAttempt = 0
-                    while (isActive && isRunning && latestVideoSeq == 0 && hsAttempt < 8) {
+                    while (isActive && isRunning && !handshakeAcked && hsAttempt < 20) {
+                        hsAttempt++
                         val hsPacket = buildHandshakePacket(sessionId, hsAttempt, baseSeq)
                         sendUdp(hsPacket)
                         log("Datalink: Sent handshake #$hsAttempt (baseSeq=0x%04X)".format(baseSeq))
-                        hsAttempt++
-                        delay(250)
+                        delay(150)
                     }
                 }
-
-                delay(150)
-                sendRegistration()
-                sendSessionWake()
-                sendLiveGate()
-                sendLiveEntryPrep()
-                sendLiveViewEnable(0x41)
-                sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
-                sendLiveViewEnable(DumlFrame.RX_CAMERA)
 
                 startAckPump()
                 startHeartbeat()
 
-                // Continuous LiveView request pump every 500ms until video packets start arriving
+                // Once handshake is acked and cmdSeq is seeded from the 34B packet, pump commands
                 launch(Dispatchers.IO) {
+                    var waitCount = 0
+                    while (isActive && isRunning && !handshakeAcked && waitCount < 30) {
+                        delay(100)
+                        waitCount++
+                    }
+                    log("Datalink: Starting command pipeline with cmdSeq=$cmdSeq...")
+                    sendRegistration()
+                    sendSessionWake()
+                    sendLiveGate()
+                    sendLiveEntryPrep()
+
                     var burstAttempt = 0
                     while (isActive && isRunning && latestVideoSeq == 0) {
                         burstAttempt++
-                        log("Datalink: LiveView burst #$burstAttempt (targets 0x41, 0x08, 0x01)...")
-                        sendSessionWake()
+                        log("Datalink: LiveView burst #$burstAttempt (cmdSeq=$cmdSeq)...")
+                        sendRegistration()
                         sendLiveGate()
                         sendLiveViewEnable(0x41)
                         sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
                         sendLiveViewEnable(DumlFrame.RX_CAMERA)
-                        delay(500)
+                        delay(400)
                     }
                     if (latestVideoSeq != 0) {
                         log("Datalink: Video stream ACTIVE! latestVideoSeq=$latestVideoSeq")
@@ -289,15 +297,24 @@ class DatalinkClient(
                     }
                     PKT_TELEMETRY -> {
                         if (pumpJob == null) startAckPump()
+                        if (len == 34) {
+                            val cameraCursor = (buf[8].toInt() and 0xFF) or ((buf[9].toInt() and 0xFF) shl 8)
+                            val seededSeq = (cameraCursor + 8) and 0xFFFF
+                            if (!handshakeAcked || cmdSeq == 0) {
+                                cmdSeq = seededSeq
+                                handshakeAcked = true
+                                log("Datalink: Handshake ACKED! Camera cursor=$cameraCursor -> seededSeq=$cmdSeq")
+                            }
+                        }
                         val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }
                         if (dumlOffset != null) {
-                            val duml = DumlFrame.parse(buf.copyOfRange(dumlOffset, len))
-                            if (duml != null) {
+                            try {
+                                val duml = DumlFrame.parse(buf.copyOfRange(dumlOffset, len))
                                 val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
                                 log("Datalink: DUML 0x%02X/0x%02X ret=%s (rcv=0x%02X) len=%d".format(
                                     duml.cmdSet, duml.cmdId, ret, duml.receiver, len
                                 ))
-                            }
+                            } catch (e: Exception) {}
                         }
                     }
                 }
@@ -322,67 +339,70 @@ class DatalinkClient(
         }
     }
 
+    private fun sendCommand(dumlFrame: DumlFrame) {
+        synchronized(sendLock) {
+            cmdCounter = (cmdCounter + 1) and 0xFF
+            val datagram = wrapCommand(dumlFrame.raw, sessionId, cmdSeq, cmdCounter)
+            sendUdp(datagram)
+            cmdSeq = (cmdSeq + 8) and 0xFFFF
+        }
+    }
     private fun sendRegistration() {
-        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
         val regFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
             DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x88,
             byteArrayOf(0x17) + "APP".toByteArray()
         )
-        val datagram = wrapCommand(regFrame, sessionId, cmdSeq)
-        sendUdp(datagram)
-        log("Datalink: Sent Registration (0x00/0x88)")
+        sendCommand(regFrame)
+        log("Datalink: Sent Registration (0x00/0x88 seq=$cmdSeq)")
     }
 
     private fun sendSessionWake() {
-        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
         val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
             DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x2B,
             byteArrayOf(0x01)
         )
-        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
-        sendUdp(datagram)
+        sendCommand(dumlFrame)
         log("Datalink: Sent Session Wake (0x00/0x2B)")
     }
 
     private fun sendLiveGate() {
-        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
         val payload = byteArrayOf(0x00, 0x00, 0x00, 0x03)
         val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
             DumlFrame.FLAG_REQUEST, 0x02, 0x09,
             payload
         )
-        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
-        sendUdp(datagram)
+        sendCommand(dumlFrame)
         log("Datalink: Sent Live Gate (0x02/0x09)")
     }
 
     private fun sendLiveEntryPrep() {
-        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
         val payload = byteArrayOf(0x08)
         val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
+            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
             DumlFrame.FLAG_REQUEST, 0x02, 0x68,
             payload
         )
-        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
-        sendUdp(datagram)
+        sendCommand(dumlFrame)
         log("Datalink: Sent Live Entry Prep (0x02/0x68)")
     }
 
     private fun sendLiveViewEnable(rcv: Int) {
-        cmdSeq = (cmdSeq + 1) and 0xFFFF
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
         val payload = byteArrayOf(0x00, 0x04, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
         val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, rcv, cmdSeq,
+            DumlFrame.SENDER_APP, rcv, dumlSeq,
             DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_LIVE_VIEW, DumlFrame.CMD_LIVE_VIEW_ENABLE,
             payload
         )
-        val datagram = wrapCommand(dumlFrame, sessionId, cmdSeq)
-        sendUdp(datagram)
-        log("Datalink: Sent Live View Enable (0x09/0xA8 to rcv=0x%02X, len=${datagram.size})".format(rcv))
+        sendCommand(dumlFrame)
+        log("Datalink: Sent Live View Enable (0x09/0xA8 rcv=0x%02X seq=$cmdSeq)".format(rcv))
     }
 
     private fun startAckPump() {
