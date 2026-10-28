@@ -94,7 +94,7 @@ class DatalinkClient(
             return header + payload
         }
 
-        fun buildAckPacket(sessionId: Int, seq: Int, videoCursor: Int, baseSeq: Int): ByteArray {
+        fun buildAckPacket(sessionId: Int, videoCursor: Int, ackedSeq: Int, extraSeq: Int): ByteArray {
             fun grp(v: Int): ByteArray {
                 val b = ByteArray(8)
                 b[0] = (v and 0xFF).toByte()
@@ -103,8 +103,8 @@ class DatalinkClient(
                 b[3] = ((v ushr 8) and 0xFF).toByte()
                 return b
             }
-            val payload = grp(videoCursor) + grp(baseSeq) + grp(baseSeq) + byteArrayOf(0, 0)
-            val header = transportHeader(PKT_ACK, payload.size, sessionId, seq)
+            val payload = grp(videoCursor) + grp(ackedSeq) + grp(extraSeq) + byteArrayOf(0, 0)
+            val header = transportHeader(PKT_ACK, payload.size, sessionId, 0)
             return header + payload
         }
     }
@@ -129,6 +129,8 @@ class DatalinkClient(
     private var dumlSeq: Int = 0xA000
     private var cmdCounter: Int = 0
     private var sessionId: Int = 0x1234
+    @Volatile private var ackedDataSeq: Int = 0x0068
+    @Volatile private var extraCursor: Int = 0x0068
     private val sendLock = Any()
     private val depacketizer = VideoDepacketizer(onVideoFrame)
 
@@ -295,13 +297,28 @@ class DatalinkClient(
                         log("Datalink: Received Handshake ACK (seq=$seq)")
                         onStats?.invoke(receivedVideoCount)
                     }
+                    PKT_ACKED_DATA -> {
+                        ackedDataSeq = seq
+                        val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }
+                        if (dumlOffset != null) {
+                            try {
+                                val duml = DumlFrame.parse(buf.copyOfRange(dumlOffset, len))
+                                val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
+                                log("Datalink: RX REPLY cmd=0x%02X/0x%02X ret=%s seq=%d".format(
+                                    duml.cmdSet, duml.cmdId, ret, seq
+                                ))
+                            } catch (e: Exception) {}
+                        }
+                    }
                     PKT_TELEMETRY -> {
                         if (pumpJob == null) startAckPump()
                         if (len == 34) {
                             val cameraCursor = (buf[8].toInt() and 0xFF) or ((buf[9].toInt() and 0xFF) shl 8)
+                            extraCursor = cameraCursor
                             val seededSeq = (cameraCursor + 8) and 0xFFFF
                             if (!handshakeAcked || cmdSeq == 0) {
                                 cmdSeq = seededSeq
+                                ackedDataSeq = cameraCursor
                                 handshakeAcked = true
                                 log("Datalink: Handshake ACKED! Camera cursor=$cameraCursor -> seededSeq=$cmdSeq")
                             }
@@ -408,12 +425,10 @@ class DatalinkClient(
     private fun startAckPump() {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
-            var ackSeq = 0
             while (isActive && isRunning) {
-                ackSeq = (ackSeq + 1) and 0xFFFF
-                val ack = buildAckPacket(sessionId, ackSeq, latestVideoSeq, baseSeq)
+                val ack = buildAckPacket(sessionId, latestVideoSeq, ackedDataSeq, extraCursor)
                 sendUdp(ack)
-                delay(30)
+                delay(25) // 40 Hz window ACK pump
             }
         }
     }
