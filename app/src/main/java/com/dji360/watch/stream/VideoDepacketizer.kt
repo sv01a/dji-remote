@@ -3,90 +3,176 @@ package com.dji360.watch.stream
 import java.io.ByteArrayOutputStream
 
 /**
- * Reassembles DJI live-view video packets into complete H.264 (AVC) or H.265 (HEVC) Access Units.
- *
- * Wire layout of video datagram:
- *   Bytes 0..7:   Transport header (pktType = 0x02 at byte 6, seq at bytes 4..5 LE)
- *   Bytes 8..19:  Routing / metadata header
- *   Bytes 20..end: Payload data
- *
- * Each video frame begins with a DJI marker (0x00 0x00 0x01 0xFF) followed by a 16-byte header
- * containing the declared payload length (little-endian u32 at bytes 4..7).
- * We strip the DJI private marker and emit pure Annex B NAL units (starting with 0x00 0x00 0x00 0x01
- * or 0x00 0x00 0x01) directly to the video decoder.
+ * Reassembles DJI live-view video packets into complete Access Units, matching OpenCine HevcDepacketizer.
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
 ) {
-    private var buffer = ByteArrayOutputStream(64 * 1024)
-    private var currentFrameNo: Int = -1
-    private var lastFragmentPos: Int = -1
-    var droppedFragments = 0
-        private set
+    private val maxEncodedBytes = 4 * 1024 * 1024
+    private var sizedMode = false
+    private var expectedSize: Int? = null
+    private var sizedBuffer = ByteArrayOutputStream(128 * 1024)
+    private var lastSizedSequence: Int? = null
+    private var currentFrame: Int? = null
+    private var buffer = ByteArrayOutputStream(128 * 1024)
+    private var lastPosition: Int? = null
+    private var corrupt = false
 
-    var droppedFrames: Int = 0
+    var droppedIncomplete = 0
         private set
 
     fun feed(packet: ByteArray) {
-        // Video packets have pktType == 0x02 at byte 6 and size > 20
         if (packet.size <= 20 || packet[6] != 0x02.toByte()) return
 
         val bodyOffset = 20
         val bodyLen = packet.size - bodyOffset
-        val frameNo = packet[16].toInt() and 0xFF
-        val pos = (packet[18].toInt() and 0xFF) * 2 + ((packet[17].toInt() and 0xFF) ushr 7)
-
-        val startsWithMarker = bodyLen >= 4 &&
+        val marker = bodyLen >= 4 &&
                 packet[bodyOffset] == 0.toByte() &&
                 packet[bodyOffset + 1] == 0.toByte() &&
                 packet[bodyOffset + 2] == 1.toByte() &&
                 packet[bodyOffset + 3] == 0xFF.toByte()
 
-        if (startsWithMarker || (currentFrameNo != -1 && currentFrameNo != frameNo)) {
-            finishCurrentFrame()
-            currentFrameNo = frameNo
-            lastFragmentPos = -1
-            
+        val declared = declaredSize(packet, bodyOffset, bodyLen)
+        val nonzeroDeclaration = marker && bodyLen >= 16 && (4..7).any { packet[bodyOffset + it] != 0.toByte() }
+
+        if (sizedMode || nonzeroDeclaration) {
+            if (!sizedMode) {
+                sizedMode = true
+                buffer.reset()
+            }
+            feedSized(packet, bodyOffset, bodyLen, marker, declared)
+            return
         }
 
-        if (lastFragmentPos != -1 && pos != lastFragmentPos + 1 && pos != lastFragmentPos) {
-            droppedFragments++
-        }
-        lastFragmentPos = pos
+        val frameNo = packet[16].toInt() and 0xFF
+        val pos = (packet[18].toInt() and 0xFF) * 2 + ((packet[17].toInt() and 0xFF) ushr 7)
 
-        buffer.write(packet, bodyOffset, bodyLen)
+        if (currentFrame != null && currentFrame != frameNo) {
+            if (buffer.size() > 0) {
+                if (corrupt) {
+                    droppedIncomplete++
+                } else {
+                    emitFrame(stripDjiMarker(buffer.toByteArray()))
+                }
+            }
+            buffer.reset()
+            corrupt = false
+            lastPosition = null
+        }
+        currentFrame = frameNo
+
+        if (lastPosition != null) {
+            val last = lastPosition!!
+            if (pos == last) return
+            if (pos < last) {
+                if (buffer.size() > 0) {
+                    if (corrupt) droppedIncomplete++
+                    else emitFrame(stripDjiMarker(buffer.toByteArray()))
+                }
+                buffer.reset()
+                corrupt = false
+            } else if (pos != last + 1) {
+                corrupt = true
+            }
+        }
+        lastPosition = pos
+
+        if (bodyLen <= maxEncodedBytes + 16 - buffer.size()) {
+            buffer.write(packet, bodyOffset, bodyLen)
+        } else {
+            corrupt = true
+        }
     }
 
-    private fun finishCurrentFrame() {
-        if (buffer.size() == 0) return
-        val raw = buffer.toByteArray()
-        buffer.reset()
+    private fun declaredSize(packet: ByteArray, offset: Int, len: Int): Int? {
+        if (len < 16) return null
+        if (packet[offset] != 0.toByte() || packet[offset + 1] != 0.toByte() ||
+            packet[offset + 2] != 1.toByte() || packet[offset + 3] != 0xFF.toByte()) {
+            return null
+        }
+        var count = 0L
+        for (i in 0..3) {
+            count = count or ((packet[offset + 4 + i].toLong() and 0xFF) shl (i * 8))
+        }
+        if (count <= 0 || count > maxEncodedBytes) return null
+        return count.toInt() + 16
+    }
 
+    private fun feedSized(
+        packet: ByteArray,
+        offset: Int,
+        len: Int,
+        marker: Boolean,
+        declared: Int?
+    ) {
+        val sequence = (packet[4].toInt() and 0xFF) or ((packet[5].toInt() and 0xFF) shl 8)
+        if (lastSizedSequence != null && sequence == lastSizedSequence) return
 
+        if (marker) {
+            if (expectedSize != null) droppedIncomplete++
+            sizedBuffer.reset()
+            expectedSize = declared
+            lastSizedSequence = null
+        }
 
-        val stripped = stripDjiMarker(raw)
-        if (stripped.isNotEmpty()) {
-            onFrameComplete(stripped)
+        val expected = expectedSize ?: return
+
+        if (lastSizedSequence != null) {
+            val expectedNextSeq = (lastSizedSequence!! + 8) and 0xFFFF
+            if (sequence != expectedNextSeq) {
+                droppedIncomplete++
+                expectedSize = null
+                sizedBuffer.reset()
+                lastSizedSequence = sequence
+                return
+            }
+        }
+        lastSizedSequence = sequence
+
+        if (len > expected - sizedBuffer.size()) {
+            droppedIncomplete++
+            expectedSize = null
+            sizedBuffer.reset()
+            return
+        }
+
+        sizedBuffer.write(packet, offset, len)
+
+        if (sizedBuffer.size() == expected) {
+            val raw = sizedBuffer.toByteArray()
+            sizedBuffer.reset()
+            expectedSize = null
+            if (raw.size > 16) {
+                val au = raw.copyOfRange(16, raw.size)
+                emitFrame(au)
+            }
+        }
+    }
+
+    private fun emitFrame(au: ByteArray) {
+        if (au.isNotEmpty()) {
+            onFrameComplete(au)
         }
     }
 
     fun reset() {
+        sizedMode = false
+        expectedSize = null
+        sizedBuffer.reset()
+        lastSizedSequence = null
+        currentFrame = null
         buffer.reset()
-        currentFrameNo = -1
-        lastFragmentPos = -1
-        
+        lastPosition = null
+        corrupt = false
+        droppedIncomplete = 0
     }
 
     companion object {
-        /**
-         * Strip DJI's private per-frame marker (0x00 0x00 0x01 0xFF + header) and return pure NAL units.
-         */
         fun stripDjiMarker(data: ByteArray): ByteArray {
             var i = 0
             while (i + 4 <= data.size) {
                 if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
                     val nalByte = data[i + 3].toInt() and 0xFF
-                    // DJI private marker is 0xFF (nal_type 63 in HEVC or 31 in AVC)
                     if (nalByte != 0xFF) {
                         return if (i == 0) data else data.copyOfRange(i, data.size)
                     }

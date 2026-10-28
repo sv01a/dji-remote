@@ -36,7 +36,12 @@ class LiveVideoDecoder(
 
         val c = codec ?: return
         try {
-            val inIndex = c.dequeueInputBuffer(0)
+            drainOutput(c)
+            var inIndex = c.dequeueInputBuffer(5_000)
+            if (inIndex < 0) {
+                drainOutput(c)
+                inIndex = c.dequeueInputBuffer(5_000)
+            }
             if (inIndex >= 0) {
                 val inBuf: ByteBuffer? = c.getInputBuffer(inIndex)
                 if (inBuf != null) {
@@ -46,23 +51,28 @@ class LiveVideoDecoder(
                     c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
                 }
             }
-
             drainOutput(c)
         } catch (e: Exception) {
             log("Decoder: feed exception: ${e.message}")
         }
     }
 
+    private var lastRenderedTimeUs: Long = 0
+
     private fun drainOutput(c: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         var outIndex = c.dequeueOutputBuffer(info, 0)
         while (outIndex >= 0) {
             frameCount++
-            if (frameCount % 60 == 1L) {
-                log("Decoder: Rendered frame #$frameCount to surface")
+            val nowUs = System.nanoTime() / 1000
+            // 30 FPS render cap (33.3ms minimum interval) to avoid display tearing and reduce watch battery/GPU load
+            val shouldRender = (nowUs - lastRenderedTimeUs >= 33_000L)
+            if (shouldRender) {
+                lastRenderedTimeUs = nowUs
+                c.releaseOutputBuffer(outIndex, true)
+            } else {
+                c.releaseOutputBuffer(outIndex, false)
             }
-            // render = true renders frame immediately to the bound Surface
-            c.releaseOutputBuffer(outIndex, true)
             outIndex = c.dequeueOutputBuffer(info, 0)
         }
     }
