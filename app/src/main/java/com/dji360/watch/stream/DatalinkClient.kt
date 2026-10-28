@@ -339,10 +339,10 @@ class DatalinkClient(
         }
     }
 
-    private fun sendCommand(dumlFrame: DumlFrame) {
+    private fun sendCommand(dumlBytes: ByteArray) {
         synchronized(sendLock) {
             cmdCounter = (cmdCounter + 1) and 0xFF
-            val datagram = wrapCommand(dumlFrame.raw, sessionId, cmdSeq, cmdCounter)
+            val datagram = wrapCommand(dumlBytes, sessionId, cmdSeq, cmdCounter)
             sendUdp(datagram)
             cmdSeq = (cmdSeq + 8) and 0xFFFF
         }
