@@ -179,15 +179,21 @@ class DatalinkClient(
                 startAckPump()
                 startHeartbeat()
 
-                // Kickstart retry at 2s if no video packets received yet
+                // Continuous LiveView request pump every 500ms until video packets start arriving
                 launch(Dispatchers.IO) {
-                    delay(2000)
-                    if (isRunning && latestVideoSeq == 0) {
-                        log("Datalink: No video packets after 2s, resending LiveView enable burst...")
+                    var burstAttempt = 0
+                    while (isActive && isRunning && latestVideoSeq == 0) {
+                        burstAttempt++
+                        log("Datalink: LiveView burst #$burstAttempt (targets 0x41, 0x08, 0x01)...")
                         sendSessionWake()
                         sendLiveGate()
                         sendLiveViewEnable(0x41)
                         sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
+                        sendLiveViewEnable(DumlFrame.RX_CAMERA)
+                        delay(500)
+                    }
+                    if (latestVideoSeq != 0) {
+                        log("Datalink: Video stream ACTIVE! latestVideoSeq=$latestVideoSeq")
                     }
                 }
 
@@ -283,11 +289,14 @@ class DatalinkClient(
                     }
                     PKT_TELEMETRY -> {
                         if (pumpJob == null) startAckPump()
-                        if (len > 8 && buf[8] == 0x55.toByte()) {
-                            val duml = DumlFrame.parse(buf.copyOfRange(8, len))
+                        val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }
+                        if (dumlOffset != null) {
+                            val duml = DumlFrame.parse(buf.copyOfRange(dumlOffset, len))
                             if (duml != null) {
                                 val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
-                                log("Datalink: DUML 0x%02X/0x%02X ret=%s len=%d".format(duml.cmdSet, duml.cmdId, ret, len))
+                                log("Datalink: DUML 0x%02X/0x%02X ret=%s (rcv=0x%02X) len=%d".format(
+                                    duml.cmdSet, duml.cmdId, ret, duml.receiverId, len
+                                ))
                             }
                         }
                     }

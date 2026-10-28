@@ -684,8 +684,12 @@ class MainActivity : Activity() {
                 startLiveStream()
             } else {
                 Diagnostics.doubleBuzz(applicationContext)
+                appendLog("WiFi: Auto-connect timed out. Opening Wi-Fi settings...")
                 liveBtn.text = "❌ WIFI"
-                delay(2000)
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                } catch (e: Exception) {}
+                delay(2500)
                 liveBtn.text = "👁 LIVE"
             }
         }
