@@ -192,7 +192,13 @@ class CameraWifiManager(
         networkCallback = callback
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val specifierBuilder = WifiNetworkSpecifier.Builder().setSsid(ssid)
+            val specifierBuilder = WifiNetworkSpecifier.Builder()
+            if (ssid.length >= 8 && (ssid.contains("-") || ssid.contains("_"))) {
+                specifierBuilder.setSsid(ssid)
+            } else {
+                val cleanPrefix = ssid.replace(" ", "")
+                specifierBuilder.setSsidPattern(android.os.PatternMatcher(cleanPrefix, android.os.PatternMatcher.PATTERN_PREFIX))
+            }
             if (password.isNotEmpty()) {
                 if (isWpa3 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     specifierBuilder.setWpa3Passphrase(password)

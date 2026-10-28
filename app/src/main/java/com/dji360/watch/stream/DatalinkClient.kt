@@ -110,10 +110,8 @@ class DatalinkClient(
     }
 
     private var socket: DatagramSocket? = null
-    private var socket10k: DatagramSocket? = null
     private var tcpSocket: Socket? = null
     private var rxJob: Job? = null
-    private var rxJob10k: Job? = null
     private var pumpJob: Job? = null
     private var heartbeatJob: Job? = null
 
@@ -142,24 +140,20 @@ class DatalinkClient(
 
             try {
                 val s = DatagramSocket(0)
-                val s2 = DatagramSocket(0)
                 try {
                     network?.bindSocket(s)
-                    network?.bindSocket(s2)
-                    log("Datalink: Bound DatagramSockets to network $network (local ports ${s.localPort}, ${s2.localPort})")
+                    log("Datalink: Bound DatagramSocket to network $network (local port ${s.localPort})")
                 } catch (e: Exception) {
                     log("Datalink: bindSocket warning: ${e.message}")
                 }
                 socket = s
-                socket10k = s2
-                log("Datalink: Dual UDP ready -> target $cameraIp:9004 / 10004")
+                log("Datalink: UDP ready -> target $cameraIp:9004")
 
                 baseSeq = (Random().nextInt(0x7F00) and 0xFFF8) or 0x0008
                 sessionId = Random().nextInt(0xFFFF)
                 cmdSeq = baseSeq + 100
 
                 rxJob = launch(Dispatchers.IO) { receiveLoop(s, 9004) }
-                rxJob10k = launch(Dispatchers.IO) { receiveLoop(s2, 10004) }
 
                 // Burst handshake packets until camera replies or up to 8 attempts
                 launch(Dispatchers.IO) {
@@ -208,14 +202,10 @@ class DatalinkClient(
         if (!isRunning) return
         isRunning = false
         rxJob?.cancel(); rxJob = null
-        rxJob10k?.cancel(); rxJob10k = null
         pumpJob?.cancel(); pumpJob = null
         heartbeatJob?.cancel(); heartbeatJob = null
         try {
             socket?.close()
-        } catch (e: Exception) {}
-        try {
-            socket10k?.close()
         } catch (e: Exception) {}
         socket = null
         try {
@@ -291,7 +281,16 @@ class DatalinkClient(
                         log("Datalink: Received Handshake ACK (seq=$seq)")
                         onStats?.invoke(receivedVideoCount)
                     }
-                    PKT_TELEMETRY -> {}
+                    PKT_TELEMETRY -> {
+                        if (pumpJob == null) startAckPump()
+                        if (len > 8 && buf[8] == 0x55.toByte()) {
+                            val duml = DumlFrame.parse(buf.copyOfRange(8, len))
+                            if (duml != null) {
+                                val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
+                                log("Datalink: DUML 0x%02X/0x%02X ret=%s len=%d".format(duml.cmdSet, duml.cmdId, ret, len))
+                            }
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 if (!isRunning) break
@@ -309,16 +308,6 @@ class DatalinkClient(
                     s.send(p)
                 } catch (e: Exception) {
                     log("Datalink: UDP 9004 send error: ${e.message}")
-                }
-            }
-        }
-        socket10k?.let { s2 ->
-            if (!s2.isClosed) {
-                try {
-                    val p = DatagramPacket(data, data.size, dest, 10004)
-                    s2.send(p)
-                } catch (e: Exception) {
-                    log("Datalink: UDP 10004 send error: ${e.message}")
                 }
             }
         }
