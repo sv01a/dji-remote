@@ -69,6 +69,9 @@ class MainActivity : Activity() {
     private lateinit var surfaceView: SurfaceView
     private lateinit var lensBtn: Button
     private var lensMode: Int = 0 // 0: FRONT, 1: REAR, 2: DUAL
+    private val isWatchDevice: Boolean by lazy {
+        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WATCH)
+    }
     private lateinit var rootView: FrameLayout
     private lateinit var logScroll: ScrollView
     private lateinit var logTextView: TextView
@@ -334,7 +337,7 @@ class MainActivity : Activity() {
                 cornerRadius = dp(12).toFloat()
                 setColor(Color.argb(160, 40, 44, 52))
             }
-            visibility = View.VISIBLE
+            visibility = if (isWatchDevice) View.GONE else View.VISIBLE
             setOnClickListener {
                 logScroll.visibility = if (logScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
             }
@@ -838,7 +841,7 @@ class MainActivity : Activity() {
         applyLensTransform()
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         liveBtn.text = "⏳ STREAM..."
-        if (::logScroll.isInitialized) logScroll.visibility = View.VISIBLE
+        if (::logScroll.isInitialized && isWatchDevice) logScroll.visibility = View.GONE
         datalinkClient?.stop()
         val net = wifiManager.findWifiNetwork()
         if (net == null) {
@@ -1088,6 +1091,10 @@ class MainActivity : Activity() {
     /* ----------------------------- misc ----------------------------- */
 
     private fun appendLog(msg: String) {
+        if (isWatchDevice) {
+            android.util.Log.d("DJIRemote", msg)
+            return
+        }
         if (msg.contains("DJI RX:") || msg.contains("DJI status:") || msg.contains("DUML RX:")) {
             return
         }
@@ -1097,7 +1104,7 @@ class MainActivity : Activity() {
         while (logHistory.size > 60) logHistory.poll()
         val text = logHistory.joinToString("\n")
         uiScope.launch {
-            if (::logTextView.isInitialized) {
+            if (::logTextView.isInitialized && logScroll.visibility == View.VISIBLE) {
                 logTextView.text = text
                 logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
             }

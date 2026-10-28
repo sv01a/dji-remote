@@ -290,7 +290,9 @@ class DatalinkClient(
                 val pktType = buf[6]
                 val seq = (buf[4].toInt() and 0xFF) or ((buf[5].toInt() and 0xFF) shl 8)
 
-                log("Datalink: RX [$port] pkt=0x%02X seq=%d len=%d".format(pktType, seq, len))
+                if (pktType != PKT_VIDEO) {
+                    log("Datalink: RX [$port] pkt=0x%02X seq=%d len=%d".format(pktType, seq, len))
+                }
                 when (pktType) {
                     PKT_VIDEO -> {
                         latestVideoSeq = seq
