@@ -178,29 +178,36 @@ class DatalinkClient(
                 startAckPump()
                 startHeartbeat()
 
-                // Once handshake is acked and cmdSeq is seeded from the 34B packet, pump commands
+                // Once handshake is acked and cmdSeq is seeded, run standard registration and single LiveView start
                 launch(Dispatchers.IO) {
                     var waitCount = 0
                     while (isActive && isRunning && !handshakeAcked && waitCount < 30) {
                         delay(100)
                         waitCount++
                     }
-                    log("Datalink: Starting command pipeline with cmdSeq=$cmdSeq...")
-                    sendRegistration()
-                    sendSessionWake()
-                    sendLiveGate()
-                    sendLiveEntryPrep()
+                    log("Datalink: Starting registration pipeline (cmdSeq=$cmdSeq)...")
+                    sendAppDeviceInfo()
+                    delay(50)
+                    sendAppPresence()
+                    delay(50)
+                    sendGimbalInit()
+                    delay(150) // Settle after registration as required by DJI firmware
 
-                    var burstAttempt = 0
-                    while (isActive && isRunning && latestVideoSeq == 0) {
-                        burstAttempt++
-                        log("Datalink: LiveView burst #$burstAttempt (cmdSeq=$cmdSeq)...")
-                        sendRegistration()
-                        sendLiveGate()
-                        sendLiveViewEnable(0x41)
-                        sendLiveViewEnable(DumlFrame.RX_VIDEO_TRANS)
-                        sendLiveViewEnable(DumlFrame.RX_CAMERA)
-                        delay(400)
+                    log("Datalink: Arming live video and sending LiveView enable...")
+                    sendLiveEntryPrep()
+                    sendLiveViewEnable(0x08) // Pocket target
+                    sendLiveViewEnable(0x41) // Nano/Action target
+
+                    // Bounded watchdog check (only resend after 2.5s if no video received yet)
+                    var retryCount = 0
+                    while (isActive && isRunning && latestVideoSeq == 0 && retryCount < 3) {
+                        delay(2500)
+                        if (latestVideoSeq == 0 && isRunning) {
+                            retryCount++
+                            log("Datalink: Video pending, retry enable #$retryCount...")
+                            sendLiveViewEnable(0x08)
+                            sendLiveViewEnable(0x41)
+                        }
                     }
                     if (latestVideoSeq != 0) {
                         log("Datalink: Video stream ACTIVE! latestVideoSeq=$latestVideoSeq")
@@ -299,28 +306,22 @@ class DatalinkClient(
                     }
                     PKT_ACKED_DATA -> {
                         ackedDataSeq = seq
-                        val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }
-                        if (dumlOffset != null) {
-                            try {
-                                val duml = DumlFrame.parse(buf.copyOfRange(dumlOffset, len))
-                                val ret = if (duml.payload.isNotEmpty()) "0x%02X".format(duml.payload[0]) else "none"
-                                log("Datalink: RX REPLY cmd=0x%02X/0x%02X ret=%s seq=%d".format(
-                                    duml.cmdSet, duml.cmdId, ret, seq
-                                ))
-                            } catch (e: Exception) {}
-                        }
+                        val hex = buf.take(minOf(len, 24)).joinToString(" ") { "%02X".format(it) }
+                        log("Datalink: RX REPLY seq=$seq len=$len: $hex")
                     }
                     PKT_TELEMETRY -> {
                         if (pumpJob == null) startAckPump()
                         if (len == 34) {
-                            val cameraCursor = (buf[8].toInt() and 0xFF) or ((buf[9].toInt() and 0xFF) shl 8)
-                            extraCursor = cameraCursor
-                            val seededSeq = (cameraCursor + 8) and 0xFFFF
+                            val vidCur = (buf[10].toInt() and 0xFF) or ((buf[11].toInt() and 0xFF) shl 8)
+                            val ackCur = (buf[18].toInt() and 0xFF) or ((buf[19].toInt() and 0xFF) shl 8)
+                            val extCur = (buf[26].toInt() and 0xFF) or ((buf[27].toInt() and 0xFF) shl 8)
+                            extraCursor = extCur
                             if (!handshakeAcked || cmdSeq == 0) {
-                                cmdSeq = seededSeq
-                                ackedDataSeq = cameraCursor
+                                val baseWindow = (buf[8].toInt() and 0xFF) or ((buf[9].toInt() and 0xFF) shl 8)
+                                cmdSeq = (baseWindow + 8) and 0xFFFF
+                                ackedDataSeq = ackCur
                                 handshakeAcked = true
-                                log("Datalink: Handshake ACKED! Camera cursor=$cameraCursor -> seededSeq=$cmdSeq")
+                                log("Datalink: Handshake ACKED! vid=$vidCur ack=$ackCur ext=$extCur -> cmdSeq=$cmdSeq")
                             }
                         }
                         val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }
@@ -364,38 +365,48 @@ class DatalinkClient(
             cmdSeq = (cmdSeq + 8) and 0xFFFF
         }
     }
-    private fun sendRegistration() {
+    private fun sendAppDeviceInfo() {
+        val b = ByteArray(62)
+        b[1] = 0x41.toByte() // 'A'
+        b[2] = 0x50.toByte() // 'P'
+        b[3] = 0x50.toByte() // 'P'
+        b[41] = 0x02.toByte()
+        b[50] = 0x02.toByte()
+        b[51] = 0x08.toByte()
         dumlSeq = (dumlSeq + 1) and 0xFFFF
-        val regFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
+        val frame = DumlFrame.build(
+            DumlFrame.SENDER_APP, 0x48, dumlSeq,
+            0x80, DumlFrame.CMDSET_COMMON, 0x81,
+            b
+        )
+        sendCommand(frame)
+        log("Datalink: Sent AppDeviceInfo (0x00/0x81 seq=$cmdSeq)")
+    }
+
+    private fun sendAppPresence() {
+        val b = byteArrayOf(
+            0x17, 0x00, 0x46, 0x23, 0x7C, 0x41, 0x50, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02
+        )
+        dumlSeq = (dumlSeq + 1) and 0xFFFF
+        val frame = DumlFrame.build(
+            DumlFrame.SENDER_APP, 0x28, dumlSeq,
             DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x88,
-            byteArrayOf(0x17) + "APP".toByteArray()
+            b
         )
-        sendCommand(regFrame)
-        log("Datalink: Sent Registration (0x00/0x88 seq=$cmdSeq)")
+        sendCommand(frame)
+        log("Datalink: Sent AppPresence (0x00/0x88 seq=$cmdSeq)")
     }
 
-    private fun sendSessionWake() {
+    private fun sendGimbalInit() {
+        val b = byteArrayOf(0x05, 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())
         dumlSeq = (dumlSeq + 1) and 0xFFFF
-        val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
-            DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x2B,
-            byteArrayOf(0x01)
+        val frame = DumlFrame.build(
+            DumlFrame.SENDER_APP, 0x03, dumlSeq,
+            DumlFrame.FLAG_REQUEST, 0x03, 0xDA.toByte().toInt() and 0xFF,
+            b
         )
-        sendCommand(dumlFrame)
-        log("Datalink: Sent Session Wake (0x00/0x2B)")
-    }
-
-    private fun sendLiveGate() {
-        dumlSeq = (dumlSeq + 1) and 0xFFFF
-        val payload = byteArrayOf(0x00, 0x00, 0x00, 0x03)
-        val dumlFrame = DumlFrame.build(
-            DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, dumlSeq,
-            DumlFrame.FLAG_REQUEST, 0x02, 0x09,
-            payload
-        )
-        sendCommand(dumlFrame)
-        log("Datalink: Sent Live Gate (0x02/0x09)")
+        sendCommand(frame)
+        log("Datalink: Sent GimbalInit (0x03/0xDA seq=$cmdSeq)")
     }
 
     private fun sendLiveEntryPrep() {
@@ -407,7 +418,7 @@ class DatalinkClient(
             payload
         )
         sendCommand(dumlFrame)
-        log("Datalink: Sent Live Entry Prep (0x02/0x68)")
+        log("Datalink: Sent Live Entry Prep (0x02/0x68 seq=$cmdSeq)")
     }
 
     private fun sendLiveViewEnable(rcv: Int) {
@@ -439,14 +450,7 @@ class DatalinkClient(
             while (isActive && isRunning) {
                 delay(1000)
                 if (!isRunning) break
-                cmdSeq = (cmdSeq + 1) and 0xFFFF
-                val regFrame = DumlFrame.build(
-                    DumlFrame.SENDER_APP, DumlFrame.RX_CAMERA, cmdSeq,
-                    DumlFrame.FLAG_REQUEST, DumlFrame.CMDSET_COMMON, 0x88,
-                    byteArrayOf(0x17) + "APP".toByteArray()
-                )
-                val datagram = wrapCommand(regFrame, sessionId, cmdSeq)
-                sendUdp(datagram)
+                sendAppPresence()
             }
         }
     }
