@@ -2,10 +2,10 @@ name: Build Watch APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feature/live-view ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, feature/live-view ]
   workflow_dispatch:
 
 concurrency:
