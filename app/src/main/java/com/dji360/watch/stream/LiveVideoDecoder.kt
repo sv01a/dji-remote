@@ -26,6 +26,9 @@ class LiveVideoDecoder(
         private set
     val renderedFrames: Long get() = frameCount
 
+    var lastError: String? = null
+        private set
+
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
 
@@ -83,14 +86,13 @@ class LiveVideoDecoder(
             log("Decoder: Initializing $mime hardware decoder...")
             val c = MediaCodec.createDecoderByType(mime)
             val format = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
             try {
                 c.configure(format, surface, null, 0)
             } catch (e: Exception) {
-                log("Decoder: Low latency configure failed, retrying: ${e.message}")
-                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 0)
+                log("Decoder: Configure exception, retrying: ${e.message}")
                 c.configure(format, surface, null, 0)
             }
             c.start()
@@ -99,7 +101,28 @@ class LiveVideoDecoder(
             startOutputLoop(c)
             log("Decoder: $mime decoder configured and output thread started")
         } catch (e: Exception) {
+            lastError = e.message
             log("Decoder: Failed to initialize $mime: ${e.message}")
+            if (mime == "video/hevc") {
+                log("Decoder: Trying fallback to video/avc...")
+                detectedMime = "video/avc"
+                try {
+                    val c = MediaCodec.createDecoderByType("video/avc")
+                    val format = MediaFormat.createVideoFormat("video/avc", 1280, 720).apply {
+                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
+                    }
+                    c.configure(format, surface, null, 0)
+                    c.start()
+                    codec = c
+                    isConfigured = true
+                    lastError = null
+                    startOutputLoop(c)
+                    log("Decoder: Fallback video/avc succeeded!")
+                } catch (e2: Exception) {
+                    lastError = e2.message
+                    log("Decoder: Fallback to video/avc failed: ${e2.message}")
+                }
+            }
         }
     }
 

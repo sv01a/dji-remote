@@ -859,11 +859,30 @@ class MainActivity : Activity() {
         datalinkClient?.requestKeyframe()
     }
 
+    private fun ensureDecoder(): LiveVideoDecoder? {
+        if (!::surfaceView.isInitialized) return null
+        val s = surfaceView.holder.surface
+        if (s != null && s.isValid) {
+            var dec = decoder
+            if (dec == null) {
+                dec = LiveVideoDecoder(s) { msg ->
+                    android.util.Log.d("DJIRemote", msg)
+                }
+                decoder = dec
+                dec.start()
+                android.util.Log.d("DJIRemote", "ensureDecoder: Created and started new LiveVideoDecoder")
+            }
+            return dec
+        }
+        return null
+    }
+
     private fun startLiveStream() {
         surfaceView.visibility = View.VISIBLE
+        ensureDecoder()
         if (::lensBtn.isInitialized) lensBtn.visibility = View.VISIBLE
         applyLensTransform()
-        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
+        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         liveBtn.text = "⏳ STREAM..."
         if (::logScroll.isInitialized && isWatchDevice) logScroll.visibility = View.GONE
         datalinkClient?.stop()
@@ -886,12 +905,15 @@ class MainActivity : Activity() {
             network = net,
             cameraIp = ip,
             onVideoFrame = { nal ->
-                decoder?.feedNalUnit(nal)
+                val dec = decoder ?: ensureDecoder()
+                dec?.feedNalUnit(nal)
             },
             onStats = { pkts ->
                 lastPkt = pkts
-                val decFrames = decoder?.renderedFrames ?: 0L
-                val mime = decoder?.codecMime ?: "init"
+                val dec = decoder ?: ensureDecoder()
+                val decFrames = dec?.renderedFrames ?: 0L
+                val mime = dec?.codecMime ?: "init"
+                val err = dec?.lastError
                 val status = "IP: $ip | UDP: $pkts | DEC: $decFrames ($mime)"
                 streamHudStatus = status
                 uiScope.launch {
@@ -900,7 +922,13 @@ class MainActivity : Activity() {
                         1 -> "R"
                         else -> "360"
                     }
-                    liveBtn.text = if (decFrames > 0) "🔴 $decFrames [$mode]" else "⏳ $pkts"
+                    liveBtn.text = if (decFrames > 0) {
+                        "🔴 $decFrames [$mode]"
+                    } else if (err != null) {
+                        "⚠️ ${err.take(8)}"
+                    } else {
+                        "⏳ $pkts ($mime)"
+                    }
                     coordText.text = status
                     coordText.visibility = View.VISIBLE
                 }
