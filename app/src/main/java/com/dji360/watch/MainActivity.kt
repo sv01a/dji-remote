@@ -246,7 +246,7 @@ class MainActivity : Activity() {
 
         // ---- BACKGROUND: SurfaceView for Live Viewfinder (Zero-copy Direct Hardware Overlay) ----
         surfaceView = SurfaceView(this).apply {
-            setZOrderMediaOverlay(false)
+            setZOrderMediaOverlay(true)
             visibility = View.VISIBLE
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(h: SurfaceHolder) {
@@ -895,7 +895,12 @@ class MainActivity : Activity() {
                 val status = "IP: $ip | UDP: $pkts | DEC: $decFrames ($mime)"
                 streamHudStatus = status
                 uiScope.launch {
-                    liveBtn.text = "🔴 $pkts"
+                    val mode = when (lensMode) {
+                        0 -> "F"
+                        1 -> "R"
+                        else -> "360"
+                    }
+                    liveBtn.text = if (decFrames > 0) "🔴 $decFrames [$mode]" else "⏳ $pkts"
                     coordText.text = status
                     coordText.visibility = View.VISIBLE
                 }
