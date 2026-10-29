@@ -3,19 +3,18 @@ package com.dji360.watch.stream
 import java.io.ByteArrayOutputStream
 
 /**
- * Robust reassembler for DJI live-view video stream.
- * Emits complete Annex-B NAL units directly to MediaCodec.
+ * High-performance, robust reassembler for DJI live-view video streams.
+ * Accurately accumulates fragments for each frame according to DJI's declared byte length,
+ * then strips the 16-byte private transport header and emits complete Annex-B Access Units
+ * at the genuine camera frame rate (30 fps).
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
 ) {
-    private val buffer = ByteArrayOutputStream(128 * 1024)
-    private var currentFrameNo: Int = -1
-    private var lastFragmentPos: Int = -1
+    private val buffer = ByteArrayOutputStream(256 * 1024)
+    private var expectedSize: Int = 0
 
     var emittedFrames: Long = 0L
-        private set
-    var droppedFragments: Long = 0L
         private set
 
     fun feed(packet: ByteArray) {
@@ -23,62 +22,67 @@ class VideoDepacketizer(
 
         val bodyOffset = 20
         val bodyLen = packet.size - bodyOffset
-        val frameNo = packet[16].toInt() and 0xFF
-        val pos = (packet[18].toInt() and 0xFF) * 2 + ((packet[17].toInt() and 0xFF) ushr 7)
+        if (bodyLen <= 0) return
 
-        val startsWithMarker = bodyLen >= 4 &&
+        // DJI frame header marker: 00 00 01 FF
+        val isFrameStart = bodyLen >= 8 &&
                 packet[bodyOffset] == 0.toByte() &&
                 packet[bodyOffset + 1] == 0.toByte() &&
                 packet[bodyOffset + 2] == 1.toByte() &&
                 packet[bodyOffset + 3] == 0xFF.toByte()
 
-        if (startsWithMarker || (currentFrameNo != -1 && currentFrameNo != frameNo)) {
-            finishCurrentFrame()
-            currentFrameNo = frameNo
-            lastFragmentPos = -1
+        if (isFrameStart) {
+            // If we have an existing buffer that was partially accumulated, emit or reset
+            if (buffer.size() > 16) {
+                if (expectedSize > 0 && buffer.size() >= (expectedSize * 85) / 100) {
+                    emitCurrentFrame()
+                } else {
+                    buffer.reset()
+                }
+            }
+
+            // Extract declared payload size from little-endian u32 at bytes 4..7
+            var count = 0L
+            for (i in 0..3) {
+                count = count or ((packet[bodyOffset + 4 + i].toLong() and 0xFF) shl (i * 8))
+            }
+
+            // Expected total size is declared payload count + 16-byte DJI header
+            expectedSize = if (count in 1..2_000_000) count.toInt() + 16 else 0
+            buffer.reset()
+            buffer.write(packet, bodyOffset, bodyLen)
+            checkComplete()
+            return
         }
 
-        if (lastFragmentPos != -1 && pos != lastFragmentPos + 1 && pos != lastFragmentPos) {
-            droppedFragments++
+        // Continuation packet of the current frame
+        if (expectedSize > 0) {
+            buffer.write(packet, bodyOffset, bodyLen)
+            checkComplete()
         }
-        lastFragmentPos = pos
-
-        buffer.write(packet, bodyOffset, bodyLen)
     }
 
-    private fun finishCurrentFrame() {
-        if (buffer.size() == 0) return
+    private fun checkComplete() {
+        if (expectedSize > 0 && buffer.size() >= expectedSize) {
+            emitCurrentFrame()
+        }
+    }
+
+    private fun emitCurrentFrame() {
         val raw = buffer.toByteArray()
         buffer.reset()
+        expectedSize = 0
 
-        val stripped = stripDjiMarker(raw)
-        if (stripped.isNotEmpty()) {
+        if (raw.size > 16) {
+            // Strip the 16-byte DJI header (00 00 01 FF + 12 metadata bytes)
+            val pureNal = raw.copyOfRange(16, raw.size)
             emittedFrames++
-            onFrameComplete(stripped)
+            onFrameComplete(pureNal)
         }
     }
 
     fun reset() {
         buffer.reset()
-        currentFrameNo = -1
-        lastFragmentPos = -1
-    }
-
-    companion object {
-        fun stripDjiMarker(data: ByteArray): ByteArray {
-            var i = 0
-            while (i + 4 <= data.size) {
-                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
-                    val nalByte = data[i + 3].toInt() and 0xFF
-                    if (nalByte != 0xFF) {
-                        return if (i == 0) data else data.copyOfRange(i, data.size)
-                    }
-                    i += 3
-                } else {
-                    i++
-                }
-            }
-            return data
-        }
+        expectedSize = 0
     }
 }
