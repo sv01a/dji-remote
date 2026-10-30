@@ -75,7 +75,20 @@ class VideoDepacketizer(
 
         if (raw.size > 16) {
             // Strip the 16-byte DJI header (00 00 01 FF + 12 metadata bytes)
-            val pureNal = raw.copyOfRange(16, raw.size)
+            // Ensure standard 4-byte Annex-B start code (00 00 00 01) for Android MediaCodec
+            val pureNal = if (raw.size >= 20 &&
+                raw[16] == 0.toByte() && raw[17] == 0.toByte() &&
+                (raw[18] == 1.toByte() || (raw[18] == 0.toByte() && raw[19] == 1.toByte()))) {
+                raw.copyOfRange(16, raw.size)
+            } else {
+                val nal = ByteArray(4 + (raw.size - 16))
+                nal[0] = 0
+                nal[1] = 0
+                nal[2] = 0
+                nal[3] = 1
+                System.arraycopy(raw, 16, nal, 4, raw.size - 16)
+                nal
+            }
             emittedFrames++
             onFrameComplete(pureNal)
         }

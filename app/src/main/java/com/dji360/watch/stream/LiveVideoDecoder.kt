@@ -19,9 +19,9 @@ class LiveVideoDecoder(
     private var isConfigured = false
     private var outputThread: Thread? = null
 
-    var detectedMime: String = "init"
+    var detectedMime: String = "video/hevc"
         private set
-    val codecMime: String get() = detectedMime
+    val codecMime: String get() = if (detectedMime.contains("hevc")) "hevc" else if (detectedMime.contains("avc")) "avc" else detectedMime
     var frameCount = 0L
         private set
     val renderedFrames: Long get() = frameCount
@@ -33,9 +33,8 @@ class LiveVideoDecoder(
         if (!isRunning) return
 
         if (!isConfigured) {
-            val mime = detectMime(nal) ?: "video/hevc"
-            detectedMime = mime
-            initCodec(mime)
+            detectedMime = "video/hevc"
+            initCodec("video/hevc")
         }
 
         val c = codec ?: return
@@ -81,7 +80,7 @@ class LiveVideoDecoder(
         }
     }
 
-    private fun initCodec(mime: String) {
+    private fun initCodec(mime: String = "video/hevc") {
         try {
             log("Decoder: Initializing $mime hardware decoder...")
             val c = MediaCodec.createDecoderByType(mime)
@@ -103,44 +102,7 @@ class LiveVideoDecoder(
         } catch (e: Exception) {
             lastError = e.message
             log("Decoder: Failed to initialize $mime: ${e.message}")
-            if (mime == "video/hevc") {
-                log("Decoder: Trying fallback to video/avc...")
-                detectedMime = "video/avc"
-                try {
-                    val c = MediaCodec.createDecoderByType("video/avc")
-                    val format = MediaFormat.createVideoFormat("video/avc", 1280, 720).apply {
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
-                    }
-                    c.configure(format, surface, null, 0)
-                    c.start()
-                    codec = c
-                    isConfigured = true
-                    lastError = null
-                    startOutputLoop(c)
-                    log("Decoder: Fallback video/avc succeeded!")
-                } catch (e2: Exception) {
-                    lastError = e2.message
-                    log("Decoder: Fallback to video/avc failed: ${e2.message}")
-                }
-            }
         }
-    }
-
-    private fun detectMime(nal: ByteArray): String? {
-        var i = 0
-        while (i + 4 <= nal.size) {
-            if (nal[i] == 0.toByte() && nal[i + 1] == 0.toByte() && nal[i + 2] == 1.toByte()) {
-                val b = nal[i + 3].toInt() and 0xFF
-                val hevcType = (b ushr 1) and 0x3F
-                val avcType = b and 0x1F
-                if (hevcType in 32..34) return "video/hevc"
-                if (avcType in 7..8) return "video/avc"
-                i += 3
-            } else {
-                i++
-            }
-        }
-        return null
     }
 
     fun start() {
