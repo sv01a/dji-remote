@@ -9,7 +9,6 @@ import java.nio.ByteBuffer
  * High-performance hardware video decoder using Android's [MediaCodec] with an
  * asynchronous dedicated output thread (matching OpenCine architecture) to guarantee
  * zero-blocking UDP ingestion and artifact-free rendering.
- * Supports auto-detection of HEVC vs AVC and dynamic fallback.
  */
 class LiveVideoDecoder(
     private val surface: Surface,
@@ -19,9 +18,8 @@ class LiveVideoDecoder(
     @Volatile private var isRunning = false
     private var isConfigured = false
     private var outputThread: Thread? = null
-    private var feedCount = 0L
 
-    var detectedMime: String = "init"
+    var detectedMime: String = "video/avc"
         private set
     var firstNalHeaderHex: String = "??"
         private set
@@ -35,12 +33,11 @@ class LiveVideoDecoder(
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
-        feedCount++
 
         if (!isConfigured) {
             val (mime, hex) = detectMime(nal)
             firstNalHeaderHex = hex
-            val chosenMime = mime ?: "video/hevc"
+            val chosenMime = mime ?: "video/avc"
             detectedMime = chosenMime
             initCodec(chosenMime)
         }
@@ -59,23 +56,12 @@ class LiveVideoDecoder(
                     val pts = System.nanoTime() / 1000
                     c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
                 }
+            } else {
+                lastError = "IN_FULL"
             }
         } catch (e: Exception) {
             lastError = "F:" + (e.message?.take(6) ?: "ERR")
             log("Decoder: feed exception: ${e.message}")
-        }
-    }
-
-    fun checkFallback() {
-        // If after 45 fed frames we still have rendered 0 frames, auto-switch to the other codec (AVC <-> HEVC)
-        if (isConfigured && frameCount == 0L && feedCount >= 45L) {
-            val nextMime = if (detectedMime.contains("hevc")) "video/avc" else "video/hevc"
-            log("Decoder: DEC is 0 after $feedCount frames. Auto-switching to $nextMime!")
-            stop()
-            detectedMime = nextMime
-            feedCount = 0L
-            start()
-            initCodec(nextMime)
         }
     }
 
@@ -101,7 +87,7 @@ class LiveVideoDecoder(
                 i++
             }
         }
-        return Pair(null, "??")
+        return Pair("video/avc", "??")
     }
 
     private fun startOutputLoop(c: MediaCodec) {
@@ -122,6 +108,7 @@ class LiveVideoDecoder(
                     }
                 } catch (e: Exception) {
                     lastError = "O:" + (e.message?.take(6) ?: "ERR")
+                    log("Decoder: out exception: ${e.message}")
                     if (!isRunning) break
                 }
             }
@@ -159,7 +146,6 @@ class LiveVideoDecoder(
     fun start() {
         isRunning = true
         frameCount = 0L
-        feedCount = 0L
     }
 
     fun stop() {
