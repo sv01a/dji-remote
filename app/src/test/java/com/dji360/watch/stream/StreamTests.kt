@@ -48,13 +48,13 @@ class StreamTests {
     }
 
     @Test
-    fun `stripDjiMarker removes private 0xFF marker and preserves SPS NAL`() {
-        val djiMarker = byteArrayOf(0, 0, 1, 0xFF.toByte(), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
-        val spsNal = byteArrayOf(0, 0, 1, 0x67, 0x42, 0x00, 0x1E)
+    fun `firstRealNalOffset skips private 0xFF marker and finds real NAL`() {
+        val djiMarker = byteArrayOf(0, 0, 1, 0xFF.toByte(), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+        val spsNal = byteArrayOf(0, 0, 0, 1, 0x40, 0x01, 0x0C)
         val combined = djiMarker + spsNal
 
-        val stripped = VideoDepacketizer.stripDjiMarker(combined)
-        assertArrayEquals(spsNal, stripped)
+        val offset = VideoDepacketizer.firstRealNalOffset(combined)
+        assertEquals(djiMarker.size, offset)
     }
 
     @Test

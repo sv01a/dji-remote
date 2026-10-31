@@ -5,7 +5,7 @@ import java.io.ByteArrayOutputStream
 /**
  * Robust, high-performance reassembler for DJI live-view video streams.
  * Accurately tracks DJI frame markers and frame sequence counters, reassembles multi-packet frames,
- * strips DJI private transport headers, and emits clean Annex-B NAL units directly to MediaCodec.
+ * dynamic scan to strip DJI private 0xFF transport headers, and emits clean Annex-B NAL units directly to MediaCodec.
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
@@ -49,25 +49,26 @@ class VideoDepacketizer(
         val raw = buffer.toByteArray()
         buffer.reset()
 
-        val stripped = stripDjiMarker(raw)
-        if (stripped.isEmpty()) return
+        val offset = firstRealNalOffset(raw)
+        val clean = if (offset > 0) raw.copyOfRange(offset, raw.size) else raw
+        if (clean.isEmpty()) return
 
         // Ensure standard 4-byte Annex-B start code (00 00 00 01) for Android MediaCodec
-        val pureNal = if (stripped.size >= 4 &&
-            stripped[0] == 0.toByte() && stripped[1] == 0.toByte() &&
-            stripped[2] == 0.toByte() && stripped[3] == 1.toByte()) {
-            stripped
-        } else if (stripped.size >= 3 &&
-            stripped[0] == 0.toByte() && stripped[1] == 0.toByte() &&
-            stripped[2] == 1.toByte()) {
-            val nal = ByteArray(1 + stripped.size)
+        val pureNal = if (clean.size >= 4 &&
+            clean[0] == 0.toByte() && clean[1] == 0.toByte() &&
+            clean[2] == 0.toByte() && clean[3] == 1.toByte()) {
+            clean
+        } else if (clean.size >= 3 &&
+            clean[0] == 0.toByte() && clean[1] == 0.toByte() &&
+            clean[2] == 1.toByte()) {
+            val nal = ByteArray(1 + clean.size)
             nal[0] = 0
-            System.arraycopy(stripped, 0, nal, 1, stripped.size)
+            System.arraycopy(clean, 0, nal, 1, clean.size)
             nal
         } else {
-            val nal = ByteArray(4 + stripped.size)
+            val nal = ByteArray(4 + clean.size)
             nal[0] = 0; nal[1] = 0; nal[2] = 0; nal[3] = 1
-            System.arraycopy(stripped, 0, nal, 4, stripped.size)
+            System.arraycopy(clean, 0, nal, 4, clean.size)
             nal
         }
 
@@ -81,13 +82,33 @@ class VideoDepacketizer(
     }
 
     companion object {
-        fun stripDjiMarker(data: ByteArray): ByteArray {
-            if (data.size >= 16 &&
-                data[0] == 0.toByte() && data[1] == 0.toByte() &&
-                data[2] == 1.toByte() && data[3] == 0xFF.toByte()) {
-                return data.copyOfRange(16, data.size)
+        /**
+         * Scans for the first real video NAL unit start code, skipping DJI private 0xFF marker
+         * and its variable-length metadata block (~13-14 bytes). Matches OpenPocketCine spec.
+         */
+        fun firstRealNalOffset(data: ByteArray): Int {
+            var i = 0
+            while (i + 3 < data.size) {
+                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
+                    if (data[i + 2] == 1.toByte()) {
+                        val nalType = data[i + 3].toInt() and 0xFF
+                        if (nalType != 0xFF) {
+                            return i
+                        }
+                        i += 3
+                        continue
+                    } else if (i + 4 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
+                        val nalType = data[i + 4].toInt() and 0xFF
+                        if (nalType != 0xFF) {
+                            return i
+                        }
+                        i += 4
+                        continue
+                    }
+                }
+                i++
             }
-            return data
+            return 0
         }
     }
 }
