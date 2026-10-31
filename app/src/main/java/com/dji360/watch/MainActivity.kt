@@ -911,14 +911,16 @@ class MainActivity : Activity() {
             onStats = { pkts ->
                 lastPkt = pkts
                 val dec = decoder ?: ensureDecoder()
+                dec?.checkFallback()
                 val decFrames = dec?.renderedFrames ?: 0L
                 val nals = datalinkClient?.emittedFrames ?: 0L
                 val mime = dec?.codecMime ?: "init"
+                val hex = dec?.firstNalHeaderHex ?: "??"
                 val err = dec?.lastError
                 if (decFrames == 0L && pkts > 20 && pkts % 40 == 0) {
                     datalinkClient?.requestKeyframe()
                 }
-                val status = "UDP: $pkts | NAL: $nals | DEC: $decFrames ($mime)"
+                val status = "UDP: $pkts | NAL: $nals | DEC: $decFrames ($mime:0x$hex)"
                 streamHudStatus = status
                 uiScope.launch {
                     val mode = when (lensMode) {
