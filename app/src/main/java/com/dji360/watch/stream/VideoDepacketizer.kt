@@ -82,19 +82,12 @@ class VideoDepacketizer(
 
     companion object {
         fun stripDjiMarker(data: ByteArray): ByteArray {
-            var i = 0
-            while (i + 4 <= data.size) {
-                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
-                    val nalByte = data[i + 3].toInt() and 0xFF
-                    if (nalByte != 0xFF) {
-                        return if (i == 0) data else data.copyOfRange(i, data.size)
-                    }
-                    i += 3
-                } else {
-                    i++
-                }
+            if (data.size >= 16 &&
+                data[0] == 0.toByte() && data[1] == 0.toByte() &&
+                data[2] == 1.toByte() && data[3] == 0xFF.toByte()) {
+                return data.copyOfRange(16, data.size)
             }
-            return if (data.size > 16) data.copyOfRange(16, data.size) else data
+            return data
         }
     }
 }

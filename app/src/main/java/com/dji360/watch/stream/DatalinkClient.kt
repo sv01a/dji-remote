@@ -325,6 +325,7 @@ class DatalinkClient(
                                 ackedDataSeq = ackCur
                                 handshakeAcked = true
                                 log("Datalink: Handshake ACKED! vid=$vidCur ack=$ackCur ext=$extCur -> cmdSeq=$cmdSeq")
+                                requestKeyframe()
                             }
                         }
                         val dumlOffset = (0 until minOf(len - 4, 32)).firstOrNull { buf[it] == 0x55.toByte() }

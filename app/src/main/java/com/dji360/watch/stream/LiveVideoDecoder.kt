@@ -39,7 +39,10 @@ class LiveVideoDecoder(
 
         val c = codec ?: return
         try {
-            val inIndex = c.dequeueInputBuffer(5_000)
+            var inIndex = c.dequeueInputBuffer(10_000)
+            if (inIndex < 0) {
+                inIndex = c.dequeueInputBuffer(10_000)
+            }
             if (inIndex >= 0) {
                 val inBuf: ByteBuffer? = c.getInputBuffer(inIndex)
                 if (inBuf != null) {
@@ -50,6 +53,7 @@ class LiveVideoDecoder(
                 }
             }
         } catch (e: Exception) {
+            lastError = e.message
             log("Decoder: feed exception: ${e.message}")
         }
     }
@@ -62,11 +66,15 @@ class LiveVideoDecoder(
                 try {
                     val outIndex = c.dequeueOutputBuffer(info, 10_000)
                     if (outIndex >= 0) {
-                        frameCount++
-                        if (frameCount % 60 == 1L) {
-                            log("Decoder: Rendered frame #$frameCount to surface")
+                        if (info.size > 0) {
+                            frameCount++
+                            if (frameCount % 60 == 1L) {
+                                log("Decoder: Rendered frame #$frameCount to surface")
+                            }
+                            c.releaseOutputBuffer(outIndex, true)
+                        } else {
+                            c.releaseOutputBuffer(outIndex, false)
                         }
-                        c.releaseOutputBuffer(outIndex, true)
                     } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         log("Decoder: Output format changed: ${c.outputFormat}")
                     }

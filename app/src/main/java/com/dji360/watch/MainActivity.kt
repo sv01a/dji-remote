@@ -68,7 +68,7 @@ class MainActivity : Activity() {
     private lateinit var liveBtn: Button
     private lateinit var surfaceView: SurfaceView
     private lateinit var lensBtn: Button
-    private var lensMode: Int = 0 // 0: FRONT, 1: REAR, 2: DUAL
+    private var lensMode: Int = 2 // 0: FRONT, 1: REAR, 2: DUAL (default to 360 full uncropped view)
     private val isWatchDevice: Boolean by lazy {
         packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WATCH)
     }
@@ -915,6 +915,9 @@ class MainActivity : Activity() {
                 val nals = datalinkClient?.emittedFrames ?: 0L
                 val mime = dec?.codecMime ?: "init"
                 val err = dec?.lastError
+                if (decFrames == 0L && pkts > 20 && pkts % 40 == 0) {
+                    datalinkClient?.requestKeyframe()
+                }
                 val status = "UDP: $pkts | NAL: $nals | DEC: $decFrames ($mime)"
                 streamHudStatus = status
                 uiScope.launch {
