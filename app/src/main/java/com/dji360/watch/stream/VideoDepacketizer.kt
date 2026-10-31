@@ -3,16 +3,15 @@ package com.dji360.watch.stream
 import java.io.ByteArrayOutputStream
 
 /**
- * High-performance, robust reassembler for DJI live-view video streams.
- * Accurately accumulates fragments for each frame according to DJI's declared byte length,
- * then strips the 16-byte private transport header and emits complete Annex-B Access Units
- * at the genuine camera frame rate (30 fps).
+ * Robust, high-performance reassembler for DJI live-view video streams.
+ * Accurately tracks DJI frame markers and frame sequence counters, reassembles multi-packet frames,
+ * strips DJI private transport headers, and emits Annex-B NAL units directly to MediaCodec.
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
 ) {
     private val buffer = ByteArrayOutputStream(256 * 1024)
-    private var expectedSize: Int = 0
+    private var currentFrameNo: Int = -1
 
     var emittedFrames: Long = 0L
         private set
@@ -24,78 +23,78 @@ class VideoDepacketizer(
         val bodyLen = packet.size - bodyOffset
         if (bodyLen <= 0) return
 
-        // DJI frame header marker: 00 00 01 FF
-        val isFrameStart = bodyLen >= 8 &&
+        val frameNo = packet[16].toInt() and 0xFF
+        val pos = (packet[18].toInt() and 0xFF) * 2 + ((packet[17].toInt() and 0xFF) ushr 7)
+
+        val startsWithMarker = bodyLen >= 4 &&
                 packet[bodyOffset] == 0.toByte() &&
                 packet[bodyOffset + 1] == 0.toByte() &&
                 packet[bodyOffset + 2] == 1.toByte() &&
                 packet[bodyOffset + 3] == 0xFF.toByte()
 
-        if (isFrameStart) {
-            // If we have an existing buffer that was partially accumulated, emit or reset
-            if (buffer.size() > 16) {
-                if (expectedSize > 0 && buffer.size() >= (expectedSize * 85) / 100) {
-                    emitCurrentFrame()
-                } else {
-                    buffer.reset()
-                }
-            }
+        val isNewFrame = (pos == 0) || startsWithMarker || (currentFrameNo != -1 && currentFrameNo != frameNo)
 
-            // Extract declared payload size from little-endian u32 at bytes 4..7
-            var count = 0L
-            for (i in 0..3) {
-                count = count or ((packet[bodyOffset + 4 + i].toLong() and 0xFF) shl (i * 8))
-            }
-
-            // Expected total size is declared payload count + 16-byte DJI header
-            expectedSize = if (count in 1..2_000_000) count.toInt() + 16 else 0
-            buffer.reset()
-            buffer.write(packet, bodyOffset, bodyLen)
-            checkComplete()
-            return
-        }
-
-        // Continuation packet of the current frame
-        if (expectedSize > 0) {
-            buffer.write(packet, bodyOffset, bodyLen)
-            checkComplete()
-        }
-    }
-
-    private fun checkComplete() {
-        if (expectedSize > 0 && buffer.size() >= expectedSize) {
+        if (isNewFrame) {
             emitCurrentFrame()
+            currentFrameNo = frameNo
+        }
+
+        if (buffer.size() < 512 * 1024) {
+            buffer.write(packet, bodyOffset, bodyLen)
         }
     }
 
     private fun emitCurrentFrame() {
+        if (buffer.size() == 0) return
         val raw = buffer.toByteArray()
         buffer.reset()
-        expectedSize = 0
 
-        if (raw.size > 16) {
-            // Strip the 16-byte DJI header (00 00 01 FF + 12 metadata bytes)
-            // Ensure standard 4-byte Annex-B start code (00 00 00 01) for Android MediaCodec
-            val pureNal = if (raw.size >= 20 &&
-                raw[16] == 0.toByte() && raw[17] == 0.toByte() &&
-                (raw[18] == 1.toByte() || (raw[18] == 0.toByte() && raw[19] == 1.toByte()))) {
-                raw.copyOfRange(16, raw.size)
-            } else {
-                val nal = ByteArray(4 + (raw.size - 16))
-                nal[0] = 0
-                nal[1] = 0
-                nal[2] = 0
-                nal[3] = 1
-                System.arraycopy(raw, 16, nal, 4, raw.size - 16)
-                nal
-            }
-            emittedFrames++
-            onFrameComplete(pureNal)
+        val stripped = stripDjiMarker(raw)
+        if (stripped.isEmpty()) return
+
+        // Ensure standard 4-byte Annex-B start code (00 00 00 01) for Android MediaCodec
+        val pureNal = if (stripped.size >= 4 &&
+            stripped[0] == 0.toByte() && stripped[1] == 0.toByte() &&
+            stripped[2] == 0.toByte() && stripped[3] == 1.toByte()) {
+            stripped
+        } else if (stripped.size >= 3 &&
+            stripped[0] == 0.toByte() && stripped[1] == 0.toByte() &&
+            stripped[2] == 1.toByte()) {
+            val nal = ByteArray(1 + stripped.size)
+            nal[0] = 0
+            System.arraycopy(stripped, 0, nal, 1, stripped.size)
+            nal
+        } else {
+            val nal = ByteArray(4 + stripped.size)
+            nal[0] = 0; nal[1] = 0; nal[2] = 0; nal[3] = 1
+            System.arraycopy(stripped, 0, nal, 4, stripped.size)
+            nal
         }
+
+        emittedFrames++
+        onFrameComplete(pureNal)
     }
 
     fun reset() {
         buffer.reset()
-        expectedSize = 0
+        currentFrameNo = -1
+    }
+
+    companion object {
+        fun stripDjiMarker(data: ByteArray): ByteArray {
+            var i = 0
+            while (i + 4 <= data.size) {
+                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) {
+                    val nalByte = data[i + 3].toInt() and 0xFF
+                    if (nalByte != 0xFF) {
+                        return if (i == 0) data else data.copyOfRange(i, data.size)
+                    }
+                    i += 3
+                } else {
+                    i++
+                }
+            }
+            return if (data.size > 16) data.copyOfRange(16, data.size) else data
+        }
     }
 }

@@ -133,6 +133,7 @@ class DatalinkClient(
     @Volatile private var extraCursor: Int = 0x0068
     private val sendLock = Any()
     private val depacketizer = VideoDepacketizer(onVideoFrame)
+    val emittedFrames: Long get() = depacketizer.emittedFrames
 
     fun start() {
         if (isRunning) return

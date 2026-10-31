@@ -912,9 +912,10 @@ class MainActivity : Activity() {
                 lastPkt = pkts
                 val dec = decoder ?: ensureDecoder()
                 val decFrames = dec?.renderedFrames ?: 0L
+                val nals = datalinkClient?.emittedFrames ?: 0L
                 val mime = dec?.codecMime ?: "init"
                 val err = dec?.lastError
-                val status = "IP: $ip | UDP: $pkts | DEC: $decFrames ($mime)"
+                val status = "UDP: $pkts | NAL: $nals | DEC: $decFrames ($mime)"
                 streamHudStatus = status
                 uiScope.launch {
                     val mode = when (lensMode) {
@@ -926,6 +927,8 @@ class MainActivity : Activity() {
                         "🔴 $decFrames [$mode]"
                     } else if (err != null) {
                         "⚠️ ${err.take(8)}"
+                    } else if (nals > 0) {
+                        "⚙️ $nals ($mime)"
                     } else {
                         "⏳ $pkts ($mime)"
                     }
@@ -937,7 +940,6 @@ class MainActivity : Activity() {
             android.util.Log.d("DJIRemote", msg)
             appendLog(msg)
             if (msg.contains("Open ports", ignoreCase = true) ||
-                msg.contains("RX [", ignoreCase = true) ||
                 msg.contains("handshake", ignoreCase = true) ||
                 msg.contains("ack", ignoreCase = true) ||
                 msg.contains("udp", ignoreCase = true) ||
