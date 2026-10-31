@@ -248,7 +248,7 @@ class MainActivity : Activity() {
 
         // ---- BACKGROUND: SurfaceView for Live Viewfinder (Zero-copy Direct Hardware Overlay) ----
         surfaceView = SurfaceView(this).apply {
-            setZOrderMediaOverlay(false)
+            setZOrderMediaOverlay(true)
             visibility = View.VISIBLE
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(h: SurfaceHolder) {

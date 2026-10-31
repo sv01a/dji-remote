@@ -107,9 +107,20 @@ class LiveVideoDecoder(
                         log("Decoder: Output format changed: ${c.outputFormat}")
                     }
                 } catch (e: Exception) {
-                    lastError = "O:" + (e.message?.take(6) ?: "ERR")
-                    log("Decoder: out exception: ${e.message}")
+                    val tag = when (e) {
+                        is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
+                        is IllegalStateException -> "ISE"
+                        is IllegalArgumentException -> "IAE"
+                        else -> e.javaClass.simpleName.take(4)
+                    }
+                    lastError = tag
+                    log("Decoder: out exception ($tag): ${e.message}")
                     if (!isRunning) break
+                    try {
+                        Thread.sleep(100)
+                        if (isRunning) initCodec(detectedMime)
+                    } catch (_: Exception) {}
+                    break
                 }
             }
         }, "dji.codec.out").also {
