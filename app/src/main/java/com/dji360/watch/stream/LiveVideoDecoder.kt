@@ -66,15 +66,11 @@ class LiveVideoDecoder(
                 try {
                     val outIndex = c.dequeueOutputBuffer(info, 10_000)
                     if (outIndex >= 0) {
-                        if (info.size > 0) {
-                            frameCount++
-                            if (frameCount % 60 == 1L) {
-                                log("Decoder: Rendered frame #$frameCount to surface")
-                            }
-                            c.releaseOutputBuffer(outIndex, true)
-                        } else {
-                            c.releaseOutputBuffer(outIndex, false)
+                        frameCount++
+                        if (frameCount % 60 == 1L) {
+                            log("Decoder: Rendered frame #$frameCount to surface")
                         }
+                        c.releaseOutputBuffer(outIndex, true)
                     } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         log("Decoder: Output format changed: ${c.outputFormat}")
                     }

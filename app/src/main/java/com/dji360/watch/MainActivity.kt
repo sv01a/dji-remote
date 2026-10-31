@@ -882,7 +882,7 @@ class MainActivity : Activity() {
         ensureDecoder()
         if (::lensBtn.isInitialized) lensBtn.visibility = View.VISIBLE
         applyLensTransform()
-        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
+        if (::rootView.isInitialized) rootView.setBackgroundColor(Color.TRANSPARENT)
         liveBtn.text = "⏳ STREAM..."
         if (::logScroll.isInitialized && isWatchDevice) logScroll.visibility = View.GONE
         datalinkClient?.stop()
@@ -969,7 +969,7 @@ class MainActivity : Activity() {
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
         wifiManager.releaseWifiLock()
-        surfaceView.visibility = View.GONE
+        surfaceView.visibility = View.VISIBLE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         liveBtn.text = "👁 LIVE"
