@@ -4,14 +4,11 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.view.Surface
 import java.nio.ByteBuffer
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
 
 /**
- * High-performance hardware video decoder using Android's [MediaCodec] with an
- * asynchronous dedicated feeder thread and dedicated output thread.
- * Decoupled from UDP ingestion to eliminate network back-pressure.
- * Includes display-rate decimation (15 FPS target) to save smartwatch GPU/battery.
+ * Robust, high-performance hardware video decoder using Android's [MediaCodec].
+ * Synchronous input queuing with bounded retry to prevent dropped reference frames.
+ * Dedicated output thread rendering at 15 FPS (decimating every 2nd frame to lighten GPU/compositor load).
  */
 class LiveVideoDecoder(
     private val surface: Surface,
@@ -21,8 +18,6 @@ class LiveVideoDecoder(
     @Volatile private var isRunning = false
     private var isConfigured = false
     private var outputThread: Thread? = null
-    private var feederThread: Thread? = null
-    private val nalQueue = LinkedBlockingQueue<ByteArray>(40)
 
     var detectedMime: String = "video/avc"
         private set
@@ -40,8 +35,7 @@ class LiveVideoDecoder(
     var lastError: String? = null
         private set
 
-    // Display decimation: decode all frames for reference integrity, but render every 2nd frame to Surface
-    // to reduce smartwatch GPU/compositor load (cuts 30 FPS -> 15 FPS)
+    // Display decimation: decode all frames for reference integrity, but render every 2nd frame (15 FPS)
     var decimateOutput: Boolean = true
 
     fun feedNalUnit(nal: ByteArray) {
@@ -57,15 +51,39 @@ class LiveVideoDecoder(
                 log("Decoder: Found KEYFRAME (0x$hex, $mime)! Initializing codec...")
                 initCodec(mime)
             } else {
-                // Drop leftover P-frames before the first keyframe to prevent green artifacts
+                // Drop leftover P-frames before first keyframe to prevent green artifacts
                 return
             }
         }
 
-        // Non-blocking queue insertion: drop oldest frame if queue is full
-        if (!nalQueue.offer(nal)) {
-            nalQueue.poll()
-            nalQueue.offer(nal)
+        val c = codec ?: return
+        try {
+            var inIndex = c.dequeueInputBuffer(5_000)
+            var retry = 0
+            while (inIndex < 0 && retry < 5 && isRunning) {
+                inIndex = c.dequeueInputBuffer(5_000)
+                retry++
+            }
+            if (inIndex >= 0) {
+                val inBuf = c.getInputBuffer(inIndex)
+                if (inBuf != null) {
+                    inBuf.clear()
+                    inBuf.put(nal)
+                    val pts = System.nanoTime() / 1000
+                    c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
+                    if (lastError == "IN_FULL") lastError = null
+                }
+            } else {
+                lastError = "IN_FULL"
+            }
+        } catch (e: Exception) {
+            val tag = when (e) {
+                is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
+                is IllegalStateException -> "ISE"
+                else -> e.javaClass.simpleName.take(4)
+            }
+            lastError = "F:$tag"
+            log("Decoder: feed exception ($tag): ${e.message}")
         }
     }
 
@@ -113,46 +131,6 @@ class LiveVideoDecoder(
         return null
     }
 
-    private fun startFeederLoop(c: MediaCodec) {
-        feederThread?.interrupt()
-        feederThread = Thread({
-            while (isRunning && codec === c) {
-                try {
-                    val nal = nalQueue.poll(20, TimeUnit.MILLISECONDS) ?: continue
-                    var inIndex = c.dequeueInputBuffer(20_000)
-                    if (inIndex < 0) {
-                        inIndex = c.dequeueInputBuffer(20_000)
-                    }
-                    if (inIndex >= 0) {
-                        val inBuf = c.getInputBuffer(inIndex)
-                        if (inBuf != null) {
-                            inBuf.clear()
-                            inBuf.put(nal)
-                            val pts = System.nanoTime() / 1000
-                            c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
-                            if (lastError == "IN_FULL") lastError = null
-                        }
-                    } else {
-                        lastError = "IN_FULL"
-                    }
-                } catch (e: InterruptedException) {
-                    break
-                } catch (e: Exception) {
-                    val tag = when (e) {
-                        is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
-                        is IllegalStateException -> "ISE"
-                        else -> e.javaClass.simpleName.take(4)
-                    }
-                    lastError = "F:$tag"
-                    log("Decoder: feeder exception ($tag): ${e.message}")
-                }
-            }
-        }, "dji.codec.feed").also {
-            it.isDaemon = true
-            it.start()
-        }
-    }
-
     private fun startOutputLoop(c: MediaCodec) {
         outputThread?.interrupt()
         outputThread = Thread({
@@ -197,22 +175,13 @@ class LiveVideoDecoder(
             val c = MediaCodec.createDecoderByType(mime)
             val format = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
-                setInteger(MediaFormat.KEY_PRIORITY, 0)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             }
-            try {
-                c.configure(format, surface, null, 0)
-            } catch (e: Exception) {
-                log("Decoder: Configure exception, retrying: ${e.message}")
-                c.configure(format, surface, null, 0)
-            }
+            c.configure(format, surface, null, 0)
             c.start()
             codec = c
             isConfigured = true
-            nalQueue.clear()
-            startFeederLoop(c)
             startOutputLoop(c)
-            log("Decoder: $mime decoder configured, feeder and output threads started")
+            log("Decoder: $mime decoder configured and output thread started")
         } catch (e: Exception) {
             lastError = e.message
             log("Decoder: Failed to initialize $mime: ${e.message}")
@@ -223,17 +192,12 @@ class LiveVideoDecoder(
         isRunning = true
         frameCount = 0L
         hasKeyframe = false
-        nalQueue.clear()
     }
 
     fun stop() {
         isRunning = false
         isConfigured = false
         hasKeyframe = false
-        nalQueue.clear()
-        val feed = feederThread
-        feederThread = null
-        feed?.interrupt()
         val out = outputThread
         outputThread = null
         out?.interrupt()
