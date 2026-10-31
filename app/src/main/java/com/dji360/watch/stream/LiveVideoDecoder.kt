@@ -8,10 +8,10 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 /**
- * Hardware video decoder with async queue architecture.
- * NAL units are enqueued non-blocking from the UDP thread.
- * A dedicated feeder thread drains the queue into MediaCodec.
- * A dedicated output thread renders decoded frames to Surface.
+ * High-performance hardware video decoder using Android's [MediaCodec] with an
+ * asynchronous dedicated feeder thread and dedicated output thread.
+ * Decoupled from UDP ingestion to eliminate network back-pressure.
+ * Includes display-rate decimation (15 FPS target) to save smartwatch GPU/battery.
  */
 class LiveVideoDecoder(
     private val surface: Surface,
@@ -22,7 +22,7 @@ class LiveVideoDecoder(
     private var isConfigured = false
     private var outputThread: Thread? = null
     private var feederThread: Thread? = null
-    private val nalQueue = LinkedBlockingQueue<ByteArray>(60)
+    private val nalQueue = LinkedBlockingQueue<ByteArray>(40)
 
     var detectedMime: String = "video/avc"
         private set
@@ -40,62 +40,77 @@ class LiveVideoDecoder(
     var lastError: String? = null
         private set
 
+    // Display decimation: decode all frames for reference integrity, but render every 2nd frame to Surface
+    // to reduce smartwatch GPU/compositor load (cuts 30 FPS -> 15 FPS)
+    var decimateOutput: Boolean = true
+
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
+
         if (!hasKeyframe) {
-            if (isKeyframeOrConfig(nal)) {
+            val keyInfo = findKeyframeOrConfig(nal)
+            if (keyInfo != null) {
                 hasKeyframe = true
-                val (mime, hex) = detectMime(nal)
+                val (mime, hex) = keyInfo
                 firstNalHeaderHex = hex
-                detectedMime = mime ?: "video/avc"
-                log("Decoder: KEYFRAME (0x$hex $detectedMime)")
-                initCodec(detectedMime)
+                detectedMime = mime
+                log("Decoder: Found KEYFRAME (0x$hex, $mime)! Initializing codec...")
+                initCodec(mime)
             } else {
+                // Drop leftover P-frames before the first keyframe to prevent green artifacts
                 return
             }
         }
+
+        // Non-blocking queue insertion: drop oldest frame if queue is full
         if (!nalQueue.offer(nal)) {
             nalQueue.poll()
             nalQueue.offer(nal)
         }
     }
 
-    private fun firstNalByte(nal: ByteArray): Int? {
+    private fun findKeyframeOrConfig(nal: ByteArray): Pair<String, String>? {
         var i = 0
-        while (i + 4 <= nal.size) {
-            if (nal[i] == 0.toByte() && nal[i+1] == 0.toByte()) {
-                if (nal[i+2] == 1.toByte()) {
-                    val b = nal[i+3].toInt() and 0xFF
-                    if (b != 0xFF) return b
-                    i += 3
-                } else if (nal[i+2] == 0.toByte() && i+4 < nal.size && nal[i+3] == 1.toByte()) {
-                    val b = nal[i+4].toInt() and 0xFF
-                    if (b != 0xFF) return b
-                    i += 4
-                } else i++
-            } else i++
+        var foundHex = "??"
+        var foundMime: String? = null
+
+        while (i + 3 <= nal.size) {
+            if (nal[i] == 0.toByte() && nal[i + 1] == 0.toByte()) {
+                val headerOffset = if (nal[i + 2] == 1.toByte()) {
+                    i + 3
+                } else if (i + 4 <= nal.size && nal[i + 2] == 0.toByte() && nal[i + 3] == 1.toByte()) {
+                    i + 4
+                } else {
+                    -1
+                }
+
+                if (headerOffset != -1 && headerOffset < nal.size) {
+                    val b = nal[headerOffset].toInt() and 0xFF
+                    if (b != 0xFF) {
+                        val avcType = b and 0x1F
+                        val hevcType = (b ushr 1) and 0x3F
+
+                        // Check for AVC parameter sets or IDR
+                        if (avcType == 7 || avcType == 8 || avcType == 5) {
+                            return Pair("video/avc", "%02X".format(b))
+                        }
+                        // Check for HEVC parameter sets or IRAP
+                        if (hevcType in 32..34 || hevcType in 19..21) {
+                            return Pair("video/hevc", "%02X".format(b))
+                        }
+
+                        if (foundMime == null) {
+                            foundHex = "%02X".format(b)
+                            foundMime = if (avcType in 1..8) "video/avc" else "video/hevc"
+                        }
+                    }
+                    i = headerOffset
+                    continue
+                }
+            }
+            i++
         }
         return null
-    }
-
-    private fun isKeyframeOrConfig(nal: ByteArray): Boolean {
-        val b = firstNalByte(nal) ?: return false
-        val avcType = b and 0x1F
-        val hevcType = (b ushr 1) and 0x3F
-        return avcType == 7 || avcType == 8 || avcType == 5 ||
-               hevcType in 32..34 || hevcType in 19..21
-    }
-
-    private fun detectMime(nal: ByteArray): Pair<String?, String> {
-        val b = firstNalByte(nal) ?: return Pair("video/avc", "??")
-        val hex = "%02X".format(b)
-        val hevcType = (b ushr 1) and 0x3F
-        val avcType = b and 0x1F
-        if (hevcType in 32..35) return Pair("video/hevc", hex)
-        if (avcType in 7..8) return Pair("video/avc", hex)
-        if (hevcType in 19..21) return Pair("video/hevc", hex)
-        if (avcType in 1..5) return Pair("video/avc", hex)
-        return Pair("video/avc", hex)
     }
 
     private fun startFeederLoop(c: MediaCodec) {
@@ -103,66 +118,104 @@ class LiveVideoDecoder(
         feederThread = Thread({
             while (isRunning && codec === c) {
                 try {
-                    val nal = nalQueue.poll(50, TimeUnit.MILLISECONDS) ?: continue
-                    val inIndex = c.dequeueInputBuffer(50_000)
+                    val nal = nalQueue.poll(20, TimeUnit.MILLISECONDS) ?: continue
+                    var inIndex = c.dequeueInputBuffer(20_000)
+                    if (inIndex < 0) {
+                        inIndex = c.dequeueInputBuffer(20_000)
+                    }
                     if (inIndex >= 0) {
                         val inBuf = c.getInputBuffer(inIndex)
                         if (inBuf != null) {
                             inBuf.clear()
                             inBuf.put(nal)
-                            c.queueInputBuffer(inIndex, 0, nal.size, System.nanoTime() / 1000, 0)
+                            val pts = System.nanoTime() / 1000
+                            c.queueInputBuffer(inIndex, 0, nal.size, pts, 0)
                             if (lastError == "IN_FULL") lastError = null
                         }
                     } else {
                         lastError = "IN_FULL"
                     }
-                } catch (e: InterruptedException) { break }
-                catch (e: Exception) {
-                    lastError = "F:" + (e.javaClass.simpleName.take(3))
-                    log("Decoder: feed err: ${e.message}")
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    val tag = when (e) {
+                        is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
+                        is IllegalStateException -> "ISE"
+                        else -> e.javaClass.simpleName.take(4)
+                    }
+                    lastError = "F:$tag"
+                    log("Decoder: feeder exception ($tag): ${e.message}")
                 }
             }
-        }, "dji.codec.feed").also { it.isDaemon = true; it.start() }
+        }, "dji.codec.feed").also {
+            it.isDaemon = true
+            it.start()
+        }
     }
 
     private fun startOutputLoop(c: MediaCodec) {
         outputThread?.interrupt()
         outputThread = Thread({
             val info = MediaCodec.BufferInfo()
+            var outFrameIdx = 0L
             while (isRunning && codec === c) {
                 try {
-                    val outIndex = c.dequeueOutputBuffer(info, 10_000)
+                    val outIndex = c.dequeueOutputBuffer(info, 15_000)
                     if (outIndex >= 0) {
+                        outFrameIdx++
+                        // Render every 2nd frame if decimation is enabled, else render all
+                        val shouldRender = !decimateOutput || (outFrameIdx % 2L == 0L)
+                        c.releaseOutputBuffer(outIndex, shouldRender)
                         frameCount++
-                        c.releaseOutputBuffer(outIndex, true)
+                        if (frameCount % 60 == 1L) {
+                            log("Decoder: Rendered frame #$frameCount to surface (render=$shouldRender)")
+                        }
+                    } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        log("Decoder: Output format: ${c.outputFormat}")
                     }
                 } catch (e: Exception) {
-                    lastError = "O:" + (e.javaClass.simpleName.take(3))
-                    log("Decoder: out err: ${e.message}")
+                    val tag = when (e) {
+                        is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
+                        is IllegalStateException -> "ISE"
+                        is IllegalArgumentException -> "IAE"
+                        else -> e.javaClass.simpleName.take(4)
+                    }
+                    lastError = "O:$tag"
+                    log("Decoder: out exception ($tag): ${e.message}")
                     if (!isRunning) break
                 }
             }
-        }, "dji.codec.out").also { it.isDaemon = true; it.start() }
+        }, "dji.codec.out").also {
+            it.isDaemon = true
+            it.start()
+        }
     }
 
     private fun initCodec(mime: String) {
         try {
+            log("Decoder: Initializing $mime hardware decoder...")
             val c = MediaCodec.createDecoderByType(mime)
-            val fmt = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
+            val format = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             }
-            c.configure(fmt, surface, null, 0)
+            try {
+                c.configure(format, surface, null, 0)
+            } catch (e: Exception) {
+                log("Decoder: Configure exception, retrying: ${e.message}")
+                c.configure(format, surface, null, 0)
+            }
             c.start()
             codec = c
             isConfigured = true
             nalQueue.clear()
             startFeederLoop(c)
             startOutputLoop(c)
-            log("Decoder: $mime started (feeder+output)")
+            log("Decoder: $mime decoder configured, feeder and output threads started")
         } catch (e: Exception) {
             lastError = e.message
-            log("Decoder: init fail: ${e.message}")
+            log("Decoder: Failed to initialize $mime: ${e.message}")
         }
     }
 
@@ -178,9 +231,17 @@ class LiveVideoDecoder(
         isConfigured = false
         hasKeyframe = false
         nalQueue.clear()
-        feederThread?.interrupt(); feederThread = null
-        outputThread?.interrupt(); outputThread = null
-        try { codec?.stop(); codec?.release() } catch (_: Exception) {}
+        val feed = feederThread
+        feederThread = null
+        feed?.interrupt()
+        val out = outputThread
+        outputThread = null
+        out?.interrupt()
+        try {
+            codec?.stop()
+            codec?.release()
+        } catch (e: Exception) {}
         codec = null
+        log("Decoder: Stopped and released")
     }
 }
