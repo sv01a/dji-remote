@@ -92,6 +92,7 @@ class MainActivity : Activity() {
     private var gpsRunning = false
     private var satCount = 0
     @Volatile private var streamHudStatus: String = ""
+    private var lastKeyframeTime: Long = 0L
     private var lastLat = 0.0
     private var lastLng = 0.0
     private var gpsFix = false
@@ -899,7 +900,14 @@ class MainActivity : Activity() {
                 val mime = dec?.codecMime ?: "init"
                 val hex = dec?.firstNalHeaderHex ?: "??"
                 val err = dec?.lastError
-                val status = if (err != null) "$pkts|$nals|DEC:$decFrames($err)" else "$pkts|$nals|DEC:$decFrames($mime:0x$hex)"
+                val hasKey = dec?.hasKeyframe ?: false
+                val now = android.os.SystemClock.uptimeMillis()
+                if (!hasKey && pkts > 15 && now - lastKeyframeTime > 3000L) {
+                    lastKeyframeTime = now
+                    datalinkClient?.requestKeyframe()
+                }
+                val keyTag = if (hasKey) mime else "NO_KEY"
+                val status = if (err != null) "$pkts|$nals|DEC:$decFrames($err)" else "$pkts|$nals|DEC:$decFrames($keyTag:0x$hex)"
                 streamHudStatus = status
                 uiScope.launch {
                     val mode = when (lensMode) {

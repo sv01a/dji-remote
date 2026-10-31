@@ -5,20 +5,15 @@ import java.io.ByteArrayOutputStream
 /**
  * Robust, high-performance reassembler for DJI live-view video streams.
  * Accurately tracks DJI frame markers and frame sequence counters, reassembles multi-packet frames,
- * drops corrupted frames to prevent decoder crashes, strips DJI private transport headers,
- * and emits clean Annex-B NAL units directly to MediaCodec.
+ * strips DJI private transport headers, and emits clean Annex-B NAL units directly to MediaCodec.
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
 ) {
     private val buffer = ByteArrayOutputStream(256 * 1024)
     private var currentFrameNo: Int = -1
-    private var lastFragmentPos: Int = -1
-    private var isCorrupt = false
 
     var emittedFrames: Long = 0L
-        private set
-    var droppedFrames: Long = 0L
         private set
 
     fun feed(packet: ByteArray) {
@@ -42,14 +37,7 @@ class VideoDepacketizer(
         if (isNewFrame) {
             emitCurrentFrame()
             currentFrameNo = frameNo
-            lastFragmentPos = -1
-            isCorrupt = false
         }
-
-        if (lastFragmentPos != -1 && pos != lastFragmentPos + 1 && pos != lastFragmentPos) {
-            isCorrupt = true // Packet dropped in network, mark frame as corrupt
-        }
-        lastFragmentPos = pos
 
         if (buffer.size() < 512 * 1024) {
             buffer.write(packet, bodyOffset, bodyLen)
@@ -60,11 +48,6 @@ class VideoDepacketizer(
         if (buffer.size() == 0) return
         val raw = buffer.toByteArray()
         buffer.reset()
-
-        if (isCorrupt) {
-            droppedFrames++
-            return // Skip broken partial frame to keep hardware decoder safe!
-        }
 
         val stripped = stripDjiMarker(raw)
         if (stripped.isEmpty()) return
@@ -95,8 +78,6 @@ class VideoDepacketizer(
     fun reset() {
         buffer.reset()
         currentFrameNo = -1
-        lastFragmentPos = -1
-        isCorrupt = false
     }
 
     companion object {

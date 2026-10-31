@@ -24,9 +24,13 @@ class LiveVideoDecoder(
     var firstNalHeaderHex: String = "??"
         private set
     val codecMime: String get() = if (detectedMime.contains("hevc")) "hevc" else if (detectedMime.contains("avc")) "avc" else detectedMime
+
     var frameCount = 0L
         private set
     val renderedFrames: Long get() = frameCount
+
+    var hasKeyframe = false
+        private set
 
     var lastError: String? = null
         private set
@@ -34,12 +38,20 @@ class LiveVideoDecoder(
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
 
-        if (!isConfigured) {
-            val (mime, hex) = detectMime(nal)
-            firstNalHeaderHex = hex
-            val chosenMime = mime ?: "video/avc"
-            detectedMime = chosenMime
-            initCodec(chosenMime)
+        val isKey = isKeyframeOrConfig(nal)
+        if (!hasKeyframe) {
+            if (isKey) {
+                hasKeyframe = true
+                val (mime, hex) = detectMime(nal)
+                firstNalHeaderHex = hex
+                val chosenMime = mime ?: "video/avc"
+                detectedMime = chosenMime
+                log("Decoder: First KEYFRAME found (0x$hex, $chosenMime)! Initializing codec...")
+                initCodec(chosenMime)
+            } else {
+                // Discard leftover GOP P-frames to prevent green screen artifacts
+                return
+            }
         }
 
         val c = codec ?: return
@@ -60,9 +72,37 @@ class LiveVideoDecoder(
                 lastError = "IN_FULL"
             }
         } catch (e: Exception) {
-            lastError = "F:" + (e.message?.take(6) ?: "ERR")
-            log("Decoder: feed exception: ${e.message}")
+            val tag = when (e) {
+                is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
+                is IllegalStateException -> "ISE"
+                else -> e.javaClass.simpleName.take(4)
+            }
+            lastError = "F:$tag"
+            log("Decoder: feed exception ($tag): ${e.message}")
         }
+    }
+
+    private fun isKeyframeOrConfig(nal: ByteArray): Boolean {
+        var i = 0
+        while (i + 4 <= nal.size) {
+            if (nal[i] == 0.toByte() && nal[i + 1] == 0.toByte() &&
+                (nal[i + 2] == 1.toByte() || (i + 5 <= nal.size && nal[i + 2] == 0.toByte() && nal[i + 3] == 1.toByte()))) {
+                val headerOffset = if (nal[i + 2] == 1.toByte()) i + 3 else i + 4
+                val b = nal[headerOffset].toInt() and 0xFF
+                if (b != 0xFF) {
+                    val avcType = b and 0x1F
+                    val hevcType = (b ushr 1) and 0x3F
+                    // AVC: 7 (SPS), 8 (PPS), 5 (IDR)
+                    if (avcType == 7 || avcType == 8 || avcType == 5) return true
+                    // HEVC: 32 (VPS), 33 (SPS), 34 (PPS), 19..21 (IDR/CRA)
+                    if (hevcType in 32..34 || hevcType in 19..21) return true
+                }
+                i += 3
+            } else {
+                i++
+            }
+        }
+        return false
     }
 
     private fun detectMime(nal: ByteArray): Pair<String?, String> {
@@ -113,14 +153,9 @@ class LiveVideoDecoder(
                         is IllegalArgumentException -> "IAE"
                         else -> e.javaClass.simpleName.take(4)
                     }
-                    lastError = tag
+                    lastError = "O:$tag"
                     log("Decoder: out exception ($tag): ${e.message}")
                     if (!isRunning) break
-                    try {
-                        Thread.sleep(100)
-                        if (isRunning) initCodec(detectedMime)
-                    } catch (_: Exception) {}
-                    break
                 }
             }
         }, "dji.codec.out").also {
@@ -157,11 +192,13 @@ class LiveVideoDecoder(
     fun start() {
         isRunning = true
         frameCount = 0L
+        hasKeyframe = false
     }
 
     fun stop() {
         isRunning = false
         isConfigured = false
+        hasKeyframe = false
         val out = outputThread
         outputThread = null
         out?.interrupt()
