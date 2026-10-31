@@ -36,7 +36,7 @@ class LiveVideoDecoder(
         private set
 
     // Display decimation: decode all frames for reference integrity, but render every 2nd frame (15 FPS)
-    var decimateOutput: Boolean = true
+    var decimateOutput: Boolean = false
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return

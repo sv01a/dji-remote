@@ -50,6 +50,9 @@ class VideoDepacketizer(
         buffer.reset()
 
         val offset = firstRealNalOffset(raw)
+        if (offset <= 0 && raw.size >= 4 && raw[0] == 0.toByte() && raw[1] == 0.toByte() && raw[2] == 1.toByte() && raw[3] == 0xFF.toByte()) {
+            return
+        }
         val clean = if (offset > 0) raw.copyOfRange(offset, raw.size) else raw
         if (clean.isEmpty()) return
 
