@@ -123,6 +123,8 @@ class MainActivity : Activity() {
                 WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
             )
         }
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
 
         buildUi()
         ble = BleClient(applicationContext)
@@ -241,7 +243,7 @@ class MainActivity : Activity() {
             (resources.displayMetrics.density * 233f)
         if (uiScale > 1f) uiScale = 1f   // never upscale beyond the design size
 
-        rootView = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        rootView = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
         val root = rootView
 
         // ---- BACKGROUND: SurfaceView for Live Viewfinder (Zero-copy Direct Hardware Overlay) ----
@@ -250,16 +252,14 @@ class MainActivity : Activity() {
             visibility = View.VISIBLE
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(h: SurfaceHolder) {
-                    val dec = LiveVideoDecoder(h.surface) { msg ->
-                        android.util.Log.d("DJIRemote", msg)
+                    if (decoder == null) {
+                        ensureDecoder()
                     }
-                    decoder = dec
-                    dec.start()
                     post { applyLensTransform() }
                 }
 
                 override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hPx: Int) {
-                    applyLensTransform()
+                    post { applyLensTransform() }
                 }
 
                 override fun surfaceDestroyed(h: SurfaceHolder) {
@@ -824,31 +824,14 @@ class MainActivity : Activity() {
         val h = surfaceView.height.toFloat()
         if (w <= 0 || h <= 0) return
 
+        surfaceView.pivotX = w / 2f
+        surfaceView.pivotY = h / 2f
+        surfaceView.scaleX = 1.0f
+        surfaceView.scaleY = 1.0f
         when (lensMode) {
-            0 -> {
-                // FRONT lens (Left circle scaled 2x and centered)
-                surfaceView.pivotX = 0f
-                surfaceView.pivotY = h / 2f
-                surfaceView.scaleX = 2.0f
-                surfaceView.scaleY = 2.0f
-                if (::lensBtn.isInitialized) lensBtn.text = "📷 FRONT"
-            }
-            1 -> {
-                // REAR lens (Right circle scaled 2x and centered)
-                surfaceView.pivotX = w
-                surfaceView.pivotY = h / 2f
-                surfaceView.scaleX = 2.0f
-                surfaceView.scaleY = 2.0f
-                if (::lensBtn.isInitialized) lensBtn.text = "📷 REAR"
-            }
-            2 -> {
-                // DUAL lens (360 both circles)
-                surfaceView.pivotX = w / 2f
-                surfaceView.pivotY = h / 2f
-                surfaceView.scaleX = 1.0f
-                surfaceView.scaleY = 1.0f
-                if (::lensBtn.isInitialized) lensBtn.text = "🌐 360"
-            }
+            0 -> if (::lensBtn.isInitialized) lensBtn.text = "📷 FRONT"
+            1 -> if (::lensBtn.isInitialized) lensBtn.text = "📷 REAR"
+            else -> if (::lensBtn.isInitialized) lensBtn.text = "🌐 360"
         }
     }
 
@@ -920,7 +903,7 @@ class MainActivity : Activity() {
                 if (decFrames == 0L && pkts > 20 && pkts % 40 == 0) {
                     datalinkClient?.requestKeyframe()
                 }
-                val status = "UDP: $pkts | NAL: $nals | DEC: $decFrames ($mime:0x$hex)"
+                val status = "$pkts|$nals|DEC:$decFrames($mime:0x$hex)"
                 streamHudStatus = status
                 uiScope.launch {
                     val mode = when (lensMode) {

@@ -61,7 +61,7 @@ class LiveVideoDecoder(
                 }
             }
         } catch (e: Exception) {
-            lastError = e.message
+            lastError = "F:" + (e.message?.take(6) ?: "ERR")
             log("Decoder: feed exception: ${e.message}")
         }
     }
@@ -121,6 +121,7 @@ class LiveVideoDecoder(
                         log("Decoder: Output format changed: ${c.outputFormat}")
                     }
                 } catch (e: Exception) {
+                    lastError = "O:" + (e.message?.take(6) ?: "ERR")
                     if (!isRunning) break
                 }
             }
