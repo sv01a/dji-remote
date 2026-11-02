@@ -36,7 +36,7 @@ class LiveVideoDecoder(
         private set
 
     // Display decimation: decode all frames for reference integrity, but render every 2nd frame (15 FPS)
-    var decimateOutput: Boolean = false
+    var decimateOutput: Boolean = true
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
@@ -142,7 +142,7 @@ class LiveVideoDecoder(
                     if (outIndex >= 0) {
                         outFrameIdx++
                         // Render every 2nd frame if decimation is enabled, else render all
-                        val shouldRender = !decimateOutput || (outFrameIdx % 2L == 0L)
+                        val shouldRender = (outFrameIdx <= 2L) || !decimateOutput || (outFrameIdx % 2L == 0L)
                         c.releaseOutputBuffer(outIndex, shouldRender)
                         frameCount++
                         if (frameCount % 60 == 1L) {

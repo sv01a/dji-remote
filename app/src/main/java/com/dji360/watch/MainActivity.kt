@@ -16,9 +16,8 @@ import android.os.Build
 import android.os.BatteryManager
 import android.os.Bundle
 import android.view.Gravity
-import android.graphics.SurfaceTexture
-import android.view.Surface
-import android.view.TextureView
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -67,8 +66,7 @@ class MainActivity : Activity() {
     private lateinit var coordText: TextView
     private lateinit var disconnectBtn: Button
     private lateinit var liveBtn: Button
-    private lateinit var textureView: TextureView
-    private var videoSurface: Surface? = null
+    private lateinit var surfaceView: SurfaceView
     private lateinit var lensBtn: Button
     private var lensMode: Int = 2 // 0: FRONT, 1: REAR, 2: DUAL (default to 360 full uncropped view)
     private val isWatchDevice: Boolean by lazy {
@@ -126,7 +124,8 @@ class MainActivity : Activity() {
                 WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
             )
         }
-        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.BLACK))
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        window.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
 
         buildUi()
         ble = BleClient(applicationContext)
@@ -179,7 +178,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::textureView.isInitialized && textureView.visibility == View.VISIBLE && datalinkClient == null) {
+        if (::surfaceView.isInitialized && surfaceView.visibility == View.VISIBLE && datalinkClient == null) {
             wifiManager.acquireWifiLock()
             if (wifiManager.isCameraWifiConnected) {
                 appendLog("WiFi: Camera network detected on resume, starting live stream...")
@@ -248,37 +247,32 @@ class MainActivity : Activity() {
         rootView = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
         val root = rootView
 
-        // ---- BACKGROUND: TextureView for Live Viewfinder (Direct hardware composited View) ----
-        textureView = TextureView(this).apply {
+        // ---- BACKGROUND: SurfaceView for Live Viewfinder (Zero-copy Direct Hardware Overlay) ----
+        surfaceView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(true)
             visibility = View.VISIBLE
-            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-                    videoSurface = Surface(st)
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(h: SurfaceHolder) {
                     if (decoder == null) {
                         ensureDecoder()
                     }
                     post { applyLensTransform() }
                 }
 
-                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                override fun surfaceChanged(h: SurfaceHolder, format: Int, w: Int, hPx: Int) {
                     post { applyLensTransform() }
                 }
 
-                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                override fun surfaceDestroyed(h: SurfaceHolder) {
                     decoder?.stop()
                     decoder = null
-                    videoSurface?.release()
-                    videoSurface = null
-                    return true
                 }
-
-                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-            }
+            })
             setOnClickListener {
                 if (decoder != null) cycleLensMode()
             }
         }
-        root.addView(textureView, FrameLayout.LayoutParams(
+        root.addView(surfaceView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
@@ -706,7 +700,7 @@ class MainActivity : Activity() {
 
         if (isWatchDevice) {
             liveBtn.text = "🔗 WI-FI..."
-            textureView.visibility = View.VISIBLE
+            surfaceView.visibility = View.VISIBLE
             android.widget.Toast.makeText(applicationContext, "Connect watch to Camera Wi-Fi", android.widget.Toast.LENGTH_LONG).show()
             try {
                 startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
@@ -826,15 +820,15 @@ class MainActivity : Activity() {
     }
 
     private fun applyLensTransform() {
-        if (!::textureView.isInitialized) return
-        val w = textureView.width.toFloat()
-        val h = textureView.height.toFloat()
+        if (!::surfaceView.isInitialized) return
+        val w = surfaceView.width.toFloat()
+        val h = surfaceView.height.toFloat()
         if (w <= 0 || h <= 0) return
 
-        textureView.pivotX = w / 2f
-        textureView.pivotY = h / 2f
-        textureView.scaleX = 1.0f
-        textureView.scaleY = 1.0f
+        surfaceView.pivotX = w / 2f
+        surfaceView.pivotY = h / 2f
+        surfaceView.scaleX = 1.0f
+        surfaceView.scaleY = 1.0f
         when (lensMode) {
             0 -> if (::lensBtn.isInitialized) lensBtn.text = "📷 FRONT"
             1 -> if (::lensBtn.isInitialized) lensBtn.text = "📷 REAR"
@@ -850,7 +844,8 @@ class MainActivity : Activity() {
     }
 
     private fun ensureDecoder(): LiveVideoDecoder? {
-        val s = videoSurface
+        if (!::surfaceView.isInitialized) return null
+        val s = surfaceView.holder.surface
         if (s != null && s.isValid) {
             var dec = decoder
             if (dec == null) {
@@ -859,7 +854,7 @@ class MainActivity : Activity() {
                 }
                 decoder = dec
                 dec.start()
-                android.util.Log.d("DJIRemote", "ensureDecoder: Created and started new LiveVideoDecoder with TextureView Surface")
+                android.util.Log.d("DJIRemote", "ensureDecoder: Created and started new LiveVideoDecoder")
             }
             return dec
         }
@@ -867,7 +862,7 @@ class MainActivity : Activity() {
     }
 
     private fun startLiveStream() {
-        textureView.visibility = View.VISIBLE
+        surfaceView.visibility = View.VISIBLE
         ensureDecoder()
         if (::lensBtn.isInitialized) lensBtn.visibility = View.VISIBLE
         applyLensTransform()
@@ -964,7 +959,7 @@ class MainActivity : Activity() {
         datalinkClient?.stop(); datalinkClient = null
         decoder?.stop(); decoder = null
         wifiManager.releaseWifiLock()
-        textureView.visibility = View.VISIBLE
+        surfaceView.visibility = View.VISIBLE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)
         if (::mainButton.isInitialized) mainButton.alpha = 1.0f
