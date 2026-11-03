@@ -2,7 +2,7 @@ package com.dji360.watch.stream
 
 import android.media.MediaCodec
 import android.media.MediaFormat
-import android.view.Surface
+import android.view.SurfaceHolder
 import java.nio.ByteBuffer
 
 /**
@@ -11,7 +11,7 @@ import java.nio.ByteBuffer
  * Dedicated output thread rendering at 15 FPS (decimating every 2nd frame to lighten GPU/compositor load).
  */
 class LiveVideoDecoder(
-    private val surface: Surface,
+    private val holder: SurfaceHolder,
     private val log: (String) -> Unit
 ) {
     private var codec: MediaCodec? = null
@@ -37,6 +37,8 @@ class LiveVideoDecoder(
 
     // Display decimation: decode all frames for reference integrity, but render every 2nd frame (15 FPS)
     var decimateOutput: Boolean = true
+
+    fun isSurfaceValid(): Boolean = holder.surface?.isValid == true
 
     fun feedNalUnit(nal: ByteArray) {
         if (!isRunning) return
@@ -77,13 +79,9 @@ class LiveVideoDecoder(
                 lastError = "IN_FULL"
             }
         } catch (e: Exception) {
-            val tag = when (e) {
-                is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
-                is IllegalStateException -> "ISE"
-                else -> e.javaClass.simpleName.take(4)
-            }
-            lastError = "F:$tag"
-            log("Decoder: feed exception ($tag): ${e.message}")
+            val exMsg = e.message ?: e.javaClass.simpleName
+            lastError = "F:" + exMsg.take(6)
+            log("Decoder: feed exception: $exMsg")
         }
     }
 
@@ -152,14 +150,13 @@ class LiveVideoDecoder(
                         log("Decoder: Output format: ${c.outputFormat}")
                     }
                 } catch (e: Exception) {
+                    val exMsg = e.message ?: e.javaClass.simpleName
                     val tag = when (e) {
                         is MediaCodec.CodecException -> "C:${e.diagnosticInfo.takeLast(4)}"
-                        is IllegalStateException -> "ISE"
-                        is IllegalArgumentException -> "IAE"
-                        else -> e.javaClass.simpleName.take(4)
+                        else -> exMsg.take(8)
                     }
                     lastError = "O:$tag"
-                    log("Decoder: out exception ($tag): ${e.message}")
+                    log("Decoder: out exception ($tag): $exMsg")
                     if (!isRunning) break
                 }
             }
@@ -171,20 +168,27 @@ class LiveVideoDecoder(
 
     private fun initCodec(mime: String) {
         try {
+            val s = holder.surface
+            if (s == null || !s.isValid) {
+                lastError = "NO_SURF"
+                log("Decoder: Surface is not valid! Cannot configure $mime")
+                return
+            }
             log("Decoder: Initializing $mime hardware decoder...")
             val c = MediaCodec.createDecoderByType(mime)
             val format = MediaFormat.createVideoFormat(mime, 1280, 720).apply {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
             }
-            c.configure(format, surface, null, 0)
+            c.configure(format, s, null, 0)
             c.start()
             codec = c
             isConfigured = true
             startOutputLoop(c)
             log("Decoder: $mime decoder configured and output thread started")
         } catch (e: Exception) {
-            lastError = e.message
-            log("Decoder: Failed to initialize $mime: ${e.message}")
+            val exMsg = e.message ?: e.javaClass.simpleName
+            lastError = "INIT:" + exMsg.take(6)
+            log("Decoder: Failed to initialize $mime: $exMsg")
         }
     }
 

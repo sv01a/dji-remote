@@ -5,7 +5,7 @@ import java.io.ByteArrayOutputStream
 /**
  * Robust, high-performance reassembler for DJI live-view video streams.
  * Accurately tracks DJI frame markers and frame sequence counters, reassembles multi-packet frames,
- * dynamic scan to strip DJI private 0xFF transport headers, and emits clean Annex-B NAL units directly to MediaCodec.
+ * strips DJI transport headers safely, and emits clean Annex-B NAL units directly to MediaCodec.
  */
 class VideoDepacketizer(
     private val onFrameComplete: (ByteArray) -> Unit
@@ -50,9 +50,6 @@ class VideoDepacketizer(
         buffer.reset()
 
         val offset = firstRealNalOffset(raw)
-        if (offset <= 0 && raw.size >= 4 && raw[0] == 0.toByte() && raw[1] == 0.toByte() && raw[2] == 1.toByte() && raw[3] == 0xFF.toByte()) {
-            return
-        }
         val clean = if (offset > 0) raw.copyOfRange(offset, raw.size) else raw
         if (clean.isEmpty()) return
 
@@ -86,30 +83,26 @@ class VideoDepacketizer(
 
     companion object {
         /**
-         * Scans for the first real video NAL unit start code, skipping DJI private 0xFF marker
-         * and its variable-length metadata block (~13-14 bytes). Matches OpenPocketCine spec.
+         * Scans for the first real video NAL unit start code, starting safely AFTER the 16-byte
+         * DJI private 0xFF transport header to avoid false matches inside metadata fields.
          */
         fun firstRealNalOffset(data: ByteArray): Int {
-            var i = 0
-            while (i + 3 < data.size) {
-                if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
-                    if (data[i + 2] == 1.toByte()) {
-                        val nalType = data[i + 3].toInt() and 0xFF
-                        if (nalType != 0xFF) {
+            if (data.size < 16) return 0
+            if (data[0] == 0.toByte() && data[1] == 0.toByte() &&
+                data[2] == 1.toByte() && data[3] == 0xFF.toByte()) {
+                var i = 16
+                val limit = minOf(36, data.size - 3)
+                while (i < limit) {
+                    if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
+                        if (data[i + 2] == 1.toByte() && data[i + 3] != 0xFF.toByte()) {
+                            return i
+                        } else if (i + 4 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte() && data[i + 4] != 0xFF.toByte()) {
                             return i
                         }
-                        i += 3
-                        continue
-                    } else if (i + 4 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) {
-                        val nalType = data[i + 4].toInt() and 0xFF
-                        if (nalType != 0xFF) {
-                            return i
-                        }
-                        i += 4
-                        continue
                     }
+                    i++
                 }
-                i++
+                return 16
             }
             return 0
         }

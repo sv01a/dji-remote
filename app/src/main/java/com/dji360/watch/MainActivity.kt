@@ -845,11 +845,13 @@ class MainActivity : Activity() {
 
     private fun ensureDecoder(): LiveVideoDecoder? {
         if (!::surfaceView.isInitialized) return null
-        val s = surfaceView.holder.surface
+        val holder = surfaceView.holder
+        val s = holder.surface
         if (s != null && s.isValid) {
             var dec = decoder
-            if (dec == null) {
-                dec = LiveVideoDecoder(s) { msg ->
+            if (dec == null || !dec.isSurfaceValid()) {
+                dec?.stop()
+                dec = LiveVideoDecoder(holder) { msg ->
                     android.util.Log.d("DJIRemote", msg)
                 }
                 decoder = dec

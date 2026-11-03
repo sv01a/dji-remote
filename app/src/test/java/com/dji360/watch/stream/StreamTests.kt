@@ -49,12 +49,12 @@ class StreamTests {
 
     @Test
     fun `firstRealNalOffset skips private 0xFF marker and finds real NAL`() {
-        val djiMarker = byteArrayOf(0, 0, 1, 0xFF.toByte(), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
+        val djiHeader = byteArrayOf(0, 0, 1, 0xFF.toByte(), 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8)
         val spsNal = byteArrayOf(0, 0, 0, 1, 0x40, 0x01, 0x0C)
-        val combined = djiMarker + spsNal
+        val combined = djiHeader + spsNal
 
         val offset = VideoDepacketizer.firstRealNalOffset(combined)
-        assertEquals(djiMarker.size, offset)
+        assertEquals(16, offset)
     }
 
     @Test
