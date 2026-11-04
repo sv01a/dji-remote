@@ -36,9 +36,9 @@ import com.dji360.watch.stream.DatalinkClient
 import com.dji360.watch.stream.LiveVideoDecoder
 import com.dji360.watch.wifi.CameraWifiManager
 import kotlinx.coroutines.CoroutineScope
-import java.lang.Class
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -81,9 +81,12 @@ class MainActivity : Activity() {
     private lateinit var ble: BleClient
     private lateinit var link: DjiLink
     private lateinit var wifiManager: CameraWifiManager
-    private var decoder: LiveVideoDecoder? = null
-    private var datalinkClient: DatalinkClient? = null
-    private val uiScope = CoroutineScope(Dispatchers.Main)
+    @Volatile private var decoder: LiveVideoDecoder? = null
+    private val decoderLock = Any()
+    @Volatile private var datalinkClient: DatalinkClient? = null
+    // SupervisorJob: a single failing child (UDP loop, decoder callback, render loop)
+    // must not cancel every other coroutine in the app and silently kill the stream.
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var uiJob: Job? = null
     private var connectJob: Job? = null
     private var wifiJob: Job? = null
@@ -264,8 +267,10 @@ class MainActivity : Activity() {
                 }
 
                 override fun surfaceDestroyed(h: SurfaceHolder) {
-                    decoder?.stop()
-                    decoder = null
+                    synchronized(decoderLock) {
+                        decoder?.stop()
+                        decoder = null
+                    }
                 }
             })
             setOnClickListener {
@@ -408,7 +413,6 @@ class MainActivity : Activity() {
                 true
             }
         }
-        liveBtn.setOnLongClickListener { showWifiConfigDialog(); true }
         liveBtn.visibility = View.GONE
         root.addView(liveBtn, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -845,22 +849,24 @@ class MainActivity : Activity() {
 
     private fun ensureDecoder(): LiveVideoDecoder? {
         if (!::surfaceView.isInitialized) return null
-        val holder = surfaceView.holder
-        val s = holder.surface
-        if (s != null && s.isValid) {
-            var dec = decoder
-            if (dec == null || !dec.isSurfaceValid()) {
-                dec?.stop()
-                dec = LiveVideoDecoder(holder) { msg ->
-                    android.util.Log.d("DJIRemote", msg)
+        synchronized(decoderLock) {
+            val holder = surfaceView.holder
+            val s = holder.surface
+            if (s != null && s.isValid) {
+                var dec = decoder
+                if (dec == null || !dec.isSurfaceValid()) {
+                    dec?.stop()
+                    dec = LiveVideoDecoder(holder) { msg ->
+                        android.util.Log.d("DJIRemote", msg)
+                    }
+                    decoder = dec
+                    dec.start()
+                    android.util.Log.d("DJIRemote", "ensureDecoder: Created and started new LiveVideoDecoder")
                 }
-                decoder = dec
-                dec.start()
-                android.util.Log.d("DJIRemote", "ensureDecoder: Created and started new LiveVideoDecoder")
+                return dec
             }
-            return dec
+            return null
         }
-        return null
     }
 
     private fun startLiveStream() {
@@ -959,8 +965,14 @@ class MainActivity : Activity() {
     private fun stopLivePreview() {
         wifiJob?.cancel(); wifiJob = null
         datalinkClient?.stop(); datalinkClient = null
-        decoder?.stop(); decoder = null
+        synchronized(decoderLock) {
+            decoder?.stop(); decoder = null
+        }
         wifiManager.releaseWifiLock()
+        // Release the Wi-Fi network request AND unbind the process: otherwise every socket in
+        // this app stays pinned to the camera AP (normal network unreachable) and the camera
+        // keeps a dangling high-priority network request alive after the preview is stopped.
+        wifiManager.disconnect()
         surfaceView.visibility = View.VISIBLE
         if (::lensBtn.isInitialized) lensBtn.visibility = View.GONE
         if (::rootView.isInitialized) rootView.setBackgroundColor(Color.BLACK)

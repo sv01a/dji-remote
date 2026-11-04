@@ -128,13 +128,26 @@ class CameraWifiManager(
         }
 
         // Prefer camera network (no internet validation or 192.168.2.x)
-        val chosen = wifiNets.firstOrNull { net ->
+        val cameraMatch = wifiNets.firstOrNull { net ->
             val lp = cm.getLinkProperties(net)
             val hasCameraSubnet = lp?.linkAddresses?.any { it.address.hostAddress?.startsWith("192.168.2.") == true } == true
             val hasCameraRoute = lp?.routes?.any { it.gateway?.hostAddress == "192.168.2.1" } == true
             val noInternet = cm.getNetworkCapabilities(net)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == false
             hasCameraSubnet || hasCameraRoute || noInternet
-        } ?: wifiNets.first()
+        }
+        val chosen = cameraMatch ?: wifiNets.first()
+
+        if (cameraMatch == null) {
+            // Falling back to an unrelated Wi-Fi (home/office AP) silently is the classic
+            // "packets sent, nothing ever answers" case — make it visible in the log.
+            val detail = wifiNets.joinToString("; ") { n ->
+                val lp = cm.getLinkProperties(n)
+                val ip = lp?.linkAddresses?.firstOrNull()?.address?.hostAddress ?: "?"
+                val gw = lp?.routes?.firstNotNullOfOrNull { it.gateway?.hostAddress } ?: "?"
+                "$n ip=$ip gw=$gw"
+            }
+            log("WiFi: WARNING — no Wi-Fi looks like the camera AP (192.168.2.x / gw 192.168.2.1): $detail")
+        }
 
         activeNetwork = chosen
         try {

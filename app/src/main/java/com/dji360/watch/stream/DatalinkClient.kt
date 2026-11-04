@@ -111,6 +111,7 @@ class DatalinkClient(
 
     private var socket: DatagramSocket? = null
     private var tcpSocket: Socket? = null
+    private var clientJob: Job? = null
     private var rxJob: Job? = null
     private var pumpJob: Job? = null
     private var heartbeatJob: Job? = null
@@ -132,7 +133,7 @@ class DatalinkClient(
     @Volatile private var ackedDataSeq: Int = 0x0068
     @Volatile private var extraCursor: Int = 0x0068
     private val sendLock = Any()
-    private val depacketizer = VideoDepacketizer(onVideoFrame)
+    private val depacketizer = VideoDepacketizer(onVideoFrame, log)
     val emittedFrames: Long get() = depacketizer.emittedFrames
 
     fun start() {
@@ -140,7 +141,8 @@ class DatalinkClient(
         isRunning = true
         depacketizer.reset()
 
-        scope.launch(Dispatchers.IO) {
+        clientJob = scope.launch(Dispatchers.IO) {
+            if (!isRunning) return@launch
             launch(Dispatchers.IO) {
                 probeCameraPorts()
                 log("Datalink: Poking TCP port $CAMERA_TCP_POKE_PORT at $cameraIp...")
@@ -225,6 +227,7 @@ class DatalinkClient(
     fun stop() {
         if (!isRunning) return
         isRunning = false
+        clientJob?.cancel(); clientJob = null
         rxJob?.cancel(); rxJob = null
         pumpJob?.cancel(); pumpJob = null
         heartbeatJob?.cancel(); heartbeatJob = null
@@ -278,15 +281,27 @@ class DatalinkClient(
     }
 
     private fun receiveLoop(s: DatagramSocket, port: Int) {
-        val buf = ByteArray(4096)
+        val buf = ByteArray(64 * 1024)
         val packet = DatagramPacket(buf, buf.size)
         var receivedVideoCount = 0
+        var loggedTruncated = false
+        var loggedTinyVideo = false
 
         while (isRunning && !s.isClosed) {
             try {
+                // A reused DatagramPacket keeps the length of the previous datagram. On the legacy
+                // Android socket implementation (API <= 29, and any runtime that derives the receive
+                // size from packet.length) that pins every later read to the size of the first tiny
+                // telemetry/ACK packet and silently shreds 1400 B video packets in half. Always
+                // re-arm the length to the full buffer before receiving.
+                packet.length = buf.size
                 s.receive(packet)
                 val len = packet.length
                 if (len < 8) continue
+                if (len == buf.size && !loggedTruncated) {
+                    loggedTruncated = true
+                    log("Datalink: WARNING datagram filled the ${buf.size}B receive buffer — packets are being truncated")
+                }
 
                 val pktType = buf[6]
                 val seq = (buf[4].toInt() and 0xFF) or ((buf[5].toInt() and 0xFF) shl 8)
@@ -296,6 +311,13 @@ class DatalinkClient(
                 }
                 when (pktType) {
                     PKT_VIDEO -> {
+                        // A real live-view datagram is ~1400 B. Tiny "video" packets mean the frame
+                        // is being shredded somewhere (socket/buffer/fragmentation), which otherwise
+                        // looks exactly like "the camera sends nothing useful".
+                        if (len < 100 && !loggedTinyVideo) {
+                            loggedTinyVideo = true
+                            log("Datalink: WARNING video packet is only $len B (expected ~1400 B) — check receive buffer/fragmentation")
+                        }
                         latestVideoSeq = seq
                         receivedVideoCount++
                         if (receivedVideoCount % 5 == 1) {
@@ -311,10 +333,22 @@ class DatalinkClient(
                         ackedDataSeq = seq
                         val hex = buf.take(minOf(len, 24)).joinToString(" ") { "%02X".format(it) }
                         log("Datalink: RX REPLY seq=$seq len=$len: $hex")
+                        // A reply to our command proves the datalink session is live even when no
+                        // 34-byte telemetry packet ever arrived; without this the pipeline never
+                        // asks the camera for an IDR keyframe.
+                        if (!handshakeAcked) {
+                            handshakeAcked = true
+                            log("Datalink: Camera replied to our command — session live, requesting keyframe")
+                            requestKeyframe()
+                        }
                     }
                     PKT_TELEMETRY -> {
                         if (pumpJob == null) startAckPump()
-                        if (len == 34) {
+                        if (len < 28 && !handshakeAcked) {
+                            log("Datalink: telemetry len=$len (cursor layout expected at 8..27): " +
+                                    buf.take(minOf(len, 28)).joinToString(" ") { "%02X".format(it) })
+                        }
+                        if (len >= 28) {
                             val vidCur = (buf[10].toInt() and 0xFF) or ((buf[11].toInt() and 0xFF) shl 8)
                             val ackCur = (buf[18].toInt() and 0xFF) or ((buf[19].toInt() and 0xFF) shl 8)
                             val extCur = (buf[26].toInt() and 0xFF) or ((buf[27].toInt() and 0xFF) shl 8)
@@ -426,7 +460,9 @@ class DatalinkClient(
     }
 
     fun requestKeyframe() {
+        if (!isRunning) return
         scope.launch(Dispatchers.IO) {
+            if (!isRunning) return@launch
             log("Datalink: Requesting fresh IDR keyframe from camera...")
             sendLiveViewEnable(0x08)
             sendLiveViewEnable(0x41)

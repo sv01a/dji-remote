@@ -29,17 +29,19 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Pre-download Gradle distribution via curl
-        run: |
-          curl -sSL --retry 5 https://services.gradle.org/distributions/gradle-8.14-bin.zip -o /tmp/gradle-8.14-bin.zip
-          ls -lh /tmp/gradle-8.14-bin.zip
+      - name: Set up Gradle 8.14.3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+          # The wrapper distribution used to be pre-downloaded with curl because the runner's Java
+          # HTTP client hit redirect timeouts against services.gradle.org. Using Gradle installed by
+          # the official action avoids the wrapper download entirely; the cache is read-only because
+          # this workflow cancels in-progress runs.
+          cache-read-only: true
 
-      - name: Make Gradle wrapper executable
-        run: chmod +x ./gradlew
-
-      - name: Build Release APK
+      - name: Build Release APK and run protocol unit tests
         run: |
-          ./gradlew :app:assembleRelease --no-daemon > /tmp/build.log 2>&1 || {
+          gradle :app:assembleRelease :app:testDebugUnitTest --no-daemon > /tmp/build.log 2>&1 || {
             grep -E "(e: [^\n]+|Compilation error|unresolved reference|FAILURE:)" /tmp/build.log | while IFS= read -r line; do
               echo "::error title=CompileError::$line"
             done
